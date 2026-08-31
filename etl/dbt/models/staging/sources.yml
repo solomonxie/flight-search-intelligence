@@ -1,0 +1,7 @@
+version: 2
+
+sources:
+  - name: raw
+    description: Raw scraped data landed by cmd/collector and cleaned by etl/spark.
+    tables:
+      - name: flight_prices
