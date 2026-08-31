@@ -1,0 +1,12 @@
+name: 'flight_search_intelligence'
+version: '1.0.0'
+config-version: 2
+
+profile: 'flight_search_intelligence'
+
+model-paths: ["models"]
+
+models:
+  flight_search_intelligence:
+    staging:
+      +materialized: view
