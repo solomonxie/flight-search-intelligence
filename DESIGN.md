@@ -19,50 +19,64 @@ until a user emails a request for a specific route/date. This bounds
 scrape volume to actual requests (see "Collection scope" below).
 
 ```
-   user email                                     search-api miss
- (route + dates)                                  (route/date not
-      │                                            yet collected)
-      ▼                                                  │
-┌───────────────┐  parse request      ┌──────────────┐   │
-│ email intake   │────────────────────▶│ Kafka topic  │◀──┘
-│ (SES inbound)  │                     │ (Strimzi,    │
-└───────────────┘                     │  route+dates+│
-                                        │  requester)  │
-                                        └──────┬───────┘
-                                               │ dequeue
-                                               ▼
-                                        ┌──────────────┐  raw result   ┌──────────────┐
-                                        │ cmd/collector │──────────────▶│  S3 raw zone │
-                                        │ (Go) — fetches│                └──────┬───────┘
-                                        │ ONLY the      │                       │
-                                        │ requested     │                       │ periodic batch
-                                        │ route on-     │                       ▼
-                                        │ demand        │                ┌──────────────┐
-                                        └──────┬────────┘                │ Spark batch  │
-                                               │ notify when ready       │  job         │
-                                               ▼                         └──────┬───────┘
-                                        ┌──────────────┐                        │
-                                        │ email reply + │                        ▼
-                                        │ search-api    │         ┌────────────────────────────────────┐
-                                        │ (both)        │         │ Delta Lake (bronze → silver, on S3) │
-                                        └──────────────┘         │ accumulates requested-route history │
-                                                                   └───────────────┬──────────────────────┘
-                                                                                    │ dbt (Spark SQL)
-                                                                                    ▼
-                                                                    ┌────────────────────────────────────┐
-                                                                    │ Delta Lake gold — fare trends per   │
-                                                                    │ previously-requested route          │
-                                                                    └───────────────┬──────────────────────┘
-                                                                                    │ sync job
-                                                                                    ▼
-                                                                             ┌──────────────┐
-                                                                             │  Postgres     │
-                                                                             │ (serving store)│
-                                                                             └──────┬────────┘
-                                                                                    ▼
-                                                                             ┌──────────────┐
-                                                                             │cmd/search-api │
-                                                                             └──────────────┘
+ user email                search-api miss
+(route+dates)            (route/date not yet
+     │                       collected)
+     ▼                            │
+┌─────────────┐                   │
+│ email intake │                  │
+│ (SES inbound)│                  │
+└──────┬───────┘                  │
+       │ parse + publish          │ publish
+       ▼                          ▼
+      ┌──────────────────────────────┐
+      │   Kafka topic (Strimzi),     │
+      │   key = route, msg = task    │
+      └───────────────┬───────────────┘
+                       │ consume
+                       ▼
+      ┌──────────────────────────────┐
+      │         cmd/collector        │
+      │  starts a Temporal workflow  │
+      │  execution per task          │
+      └───────────────┬───────────────┘
+                       ▼
+      ┌──────────────────────────────┐
+      │            Temporal          │
+      │ activities fetch fares with  │
+      │ built-in retry; complex      │
+      │ tasks fan out into child     │
+      │ workflows, fan back in       │
+      │ before completing            │
+      └──────┬────────────────┬──────┘
+             │ raw result     │ notify when done
+             ▼                ▼
+      ┌─────────────┐  ┌────────────────────┐
+      │ S3 raw zone │  │ email reply AND     │
+      └──────┬──────┘  │ search-api availab. │
+             │          └────────────────────┘
+             │ periodic batch
+             ▼
+      ┌────────────────────────────────────┐
+      │ Delta Lake (bronze → silver, on S3) │
+      │ accumulates requested-route history │
+      └────────────────┬─────────────────────┘
+                        │ dbt (Spark SQL)
+                        ▼
+      ┌────────────────────────────────────┐
+      │ Delta Lake gold — fare trends per   │
+      │ previously-requested route          │
+      └────────────────┬─────────────────────┘
+                        │ sync job
+                        ▼
+                 ┌───────────────┐
+                 │   Postgres     │
+                 │ (serving store)│
+                 └───────┬────────┘
+                         ▼
+                 ┌───────────────┐
+                 │ cmd/search-api │
+                 └───────────────┘
 ```
 
 ## Collection scope
@@ -98,13 +112,21 @@ scrape volume to actual requests (see "Collection scope" below).
   the same Kafka request topic and returns a "pending" response rather
   than an empty one — the second of two producers into that topic.
 
-- **`cmd/collector` (Go)** — on-demand only: consumes the Kafka request
-  topic (self-hosted via Strimzi — one job type, no fan-out/replay
-  need), fetches that single route/date from the provider, writes the
-  raw result to the S3 raw zone, and signals completion on both the
-  email-reply and search-api-availability paths (both are wired, per
-  the resolved response-channel decision). No scheduled/broad scraping
-  mode.
+- **`cmd/collector` (Go)** — on-demand only, and thin: consumes the
+  Kafka request topic (self-hosted via Strimzi) and starts one
+  Temporal workflow execution per task. All the actual fetch/retry/
+  fan-out logic lives in Temporal workflow and activity code (see
+  "Collector task queue" below), not in the Kafka-consuming loop
+  itself. No scheduled/broad scraping mode.
+
+- **Temporal** (new, not yet in the repo) — self-managed workflow
+  engine: runs the collector's workflow/activity code, gives fetch
+  retries, per-route/provider rate limiting, and complex-search
+  fan-out/fan-in correctness for free instead of hand-rolled Kafka
+  message juggling. Needs its own Postgres-backed persistence store
+  (separate from the serving store, per Temporal's own recommendation)
+  and, optionally, its Web UI for observability. See "Collector task
+  queue" below for how it fits with Kafka.
 
 - **Spark** (`etl/spark/clean_raw_flights.py`) — periodic batch job
   (not continuous streaming — there's no continuous fare feed to
@@ -139,13 +161,112 @@ scrape volume to actual requests (see "Collection scope" below).
   else is self-managed. Nothing under `infra/` exists yet — this is
   target state, not current.
 
+## Collector task queue: Kafka → Temporal
+
+How a task actually moves from "an email/search-api miss arrived" to
+"fetched, stored, and the requester notified" — including the case
+where fulfilling one request means fetching several fares (a
+multi-city itinerary, or a worker deciding mid-flight that a request
+needs several sub-fetches).
+
+**Message schema** (JSON on the Kafka request topic):
+
+```
+{
+  "task_id":        "uuid",
+  "origin":         "SFO",
+  "destination":    "JFK",
+  "depart_date":    "2026-12-05",
+  "return_date":    null,
+  "requester": {
+    "channel":  "email" | "search-api",
+    "email":    "...",        // present when channel == email
+    "trace_id": "..."         // present when channel == search-api
+  },
+  "created_at": "..."
+}
+```
+
+**Producers**: `email intake` and `cmd/search-api` (on a miss) both
+publish this same message shape onto one Kafka topic — **keyed by
+route** (`origin-destination`, e.g. `SFO-JFK`), not by `task_id`. That
+puts every request for the same route on one partition, so per-route/
+per-provider politeness (rate limiting) is a local property of one
+partition's consumer rather than something requiring cross-worker
+coordination. Trade-off, accepted: a single very busy route can
+bottleneck one partition/worker; not a concern at this project's
+request-bounded volume (see "Collection scope").
+
+**Kafka client**: `confluent-kafka-go` (wraps librdkafka via cgo) —
+most battle-tested Go Kafka client. Implementation note: this means
+`cmd/collector`, `cmd/search-api`, and email intake all need cgo
+enabled and librdkafka available at build *and* run time, so their
+Dockerfiles need a glibc base with `librdkafka` installed (e.g.
+Debian-slim + `apt-get install librdkafka-dev`) rather than a minimal
+`scratch`/distroless final stage — a real (small) cost of this choice
+over a pure-Go client, worth remembering when writing those
+Dockerfiles.
+
+**`cmd/collector`'s consumer loop** is intentionally thin: for each
+Kafka message, it starts one Temporal workflow execution
+(`CollectRouteWorkflow`), keyed by `task_id` as the Temporal workflow
+ID (so a redelivered Kafka message that tries to start the same
+workflow ID again is a no-op — Temporal's own dedup, not a hand-rolled
+one), then commits the Kafka offset. Everything past that point is
+Temporal's problem, not the consumer loop's.
+
+**`CollectRouteWorkflow`** (runs in Temporal, code lives in
+`cmd/collector` as the Temporal worker):
+1. Decide simple vs. complex. A simple request (one O/D/date pair) is
+   the common case; complex covers things like a multi-city itinerary
+   or a workflow that, having started, determines it needs several
+   date/leg variants to answer the original request.
+2. **Simple**: run one `FetchFareActivity(origin, destination, date)`
+   — Temporal retries it automatically per a configured retry policy
+   (backoff, max attempts) if the provider call fails, no hand-rolled
+   retry-topic/DLQ needed. On success, write the raw result to the S3
+   raw zone and finish.
+3. **Complex**: the workflow itself is the "worker that produces more
+   tasks" — it starts N child workflow executions (one
+   `CollectRouteWorkflow` per leg/variant, same code, recursively
+   simple at that level), runs them concurrently, and `Get()`s every
+   child's result before proceeding — Temporal's native fan-out/
+   fan-in, not a hand-rolled `expected_children`/`completed_children`
+   tracking table. If a child ultimately fails after its retries are
+   exhausted, the parent decides whether that's a whole-request
+   failure or a partial result, and reports accordingly — this
+   decision point is itself part of what a workflow gives you for
+   free (a durable place to make that call) that a bag of Kafka
+   messages doesn't.
+4. On completion (success or terminal failure), the workflow's last
+   step notifies both response channels: sends the email reply and
+   makes the result available to `cmd/search-api` (exact mechanism —
+   e.g. `search-api` querying Temporal workflow status by `task_id`
+   vs. the workflow writing a "ready" marker somewhere `search-api`
+   already reads — still open, not blocking).
+
+**Rate limiting / politeness toward providers**: Temporal worker
+options support capping concurrent activity execution per task queue,
+which doubles as the per-provider throttle this project cares about
+(see the earlier scraping-safety discussion) — another thing that
+doesn't need separate hand-rolled machinery now.
+
+**Local dev fit**: Temporal ships a built-in dev server
+(`temporal server start-dev`) backed by SQLite — a direct match for
+the "SQLite locally, Postgres in prod" split already decided for the
+serving store, so local dev doesn't need a second Postgres instance
+just for Temporal's own persistence.
+
 ## Open decisions
 
 **Resolved:** cloud = AWS EC2, self-managed compute; IaC = Terraform
 (provision) + Ansible (configure) + Docker + Kubernetes + Helm
 (deploy); object storage = S3; inbound email = SES; request queue =
-Kafka/Strimzi; response channel = both email reply and search-api;
-search-api triggers collection on a miss, not just email.
+Kafka/Strimzi, keyed by route; Kafka client = `confluent-kafka-go`;
+response channel = both email reply and search-api; search-api
+triggers collection on a miss, not just email; fan-out/fan-in for
+complex requests and fetch retries = Temporal (see "Collector task
+queue"), not a hand-rolled tracking table.
 
 - **Kubernetes distro**: not asked — defaulting to **k3s** (lighter
   control-plane footprint than kubeadm/RKE2, well-suited to a
@@ -196,6 +317,10 @@ about what works in prod.
 - **Kafka**: same as prod, no substitution — Strimzi, single-broker
   KRaft mode (no ZooKeeper), deployed into the local cluster with
   lower resource requests/limits in `values-local.yaml`.
+- **Temporal**: `temporal server start-dev` (its own built-in
+  SQLite-backed dev server) instead of a Helm-deployed Temporal +
+  Postgres — matches the SQLite-for-simplicity choice already made
+  for the serving store, and needs no extra cluster resources.
 - **Spark**: same as prod default, no substitution — the
   Spark-on-Kubernetes operator runs inside the local cluster too
   (not `local[*]` mode), affordable here since data volumes are tiny
@@ -220,15 +345,18 @@ about what works in prod.
   locally.
 - **End-to-end test flow** (should be one scriptable command, not just
   manual steps, so it also runs in CI):
-  1. Bring up the cluster + Helm-installed stack (Kafka, MinIO,
-     SQLite-backed search-api/collector/email-intake, Spark operator).
+  1. Bring up the cluster + stack: Kafka, MinIO, SQLite-backed
+     search-api/collector/email-intake, Spark operator (Helm), plus
+     the Temporal dev server (not Helm — see above).
   2. POST a sample raw-email fixture to the local email-intake
      endpoint (exercises the email path), or query `search-api` for a
      route that's a known miss (exercises the search-triggered path).
-  3. Watch it flow: Kafka → collector (mock provider) → MinIO raw zone
-     → Spark batch → Delta Lake (on MinIO) → dbt gold → sync → SQLite.
+  3. Watch it flow: Kafka → collector starts a Temporal workflow
+     (mock provider activity) → MinIO raw zone → Spark batch → Delta
+     Lake (on MinIO) → dbt gold → sync → SQLite.
   4. Query `search-api` for that route/date and assert the result.
 - **Sizing**: a single k3d node running Kafka (1 broker) + the Spark
-  operator + MinIO + a handful of small Go services should fit an M1
-  MacBook's unified memory at low resource requests — flagging as an
-  assumption to revisit if it turns out too heavy, not a blocker.
+  operator + MinIO + a handful of small Go services + the lightweight
+  Temporal dev server should fit an M1 MacBook's unified memory at low
+  resource requests — flagging as an assumption to revisit if it turns
+  out too heavy, not a blocker.
