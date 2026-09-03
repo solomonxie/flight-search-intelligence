@@ -1,12 +1,13 @@
-// Command collector runs the data-collection/scraping service: fetches
-// flight fares from providers and writes them to Postgres for
-// cmd/search-api to query.
+// Command collector runs the on-demand fare-collection service: consumes
+// one route/date request at a time from the Kafka request topic (see
+// DESIGN.md) and fetches just that route from a provider.
 package main
 
 import "fmt"
 
 func main() {
-	// TODO: scrape flight fares from provider(s) on a schedule and
-	// persist results via internal/db (see internal/db/migrations/0001_init.sql).
+	// TODO: consume a request off the Kafka topic, fetch that single
+	// route/date from a provider, and write the raw result to the S3
+	// raw zone (see DESIGN.md). No scheduled/broad scraping.
 	fmt.Println("flight-search-intelligence: collector (scaffold, not yet implemented)")
 }
