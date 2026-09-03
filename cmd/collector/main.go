@@ -1,13 +1,15 @@
 // Command collector runs the on-demand fare-collection service: consumes
-// one route/date request at a time from the Kafka request topic (see
-// DESIGN.md) and fetches just that route from a provider.
+// one route/date request at a time from the Kafka request topic and
+// starts a Temporal workflow to fetch it (see DESIGN.md, "Collector
+// task queue"). The consumer loop itself stays thin — fetch/retry/
+// fan-out logic lives in the Temporal workflow/activity code, not here.
 package main
 
 import "fmt"
 
 func main() {
-	// TODO: consume a request off the Kafka topic, fetch that single
-	// route/date from a provider, and write the raw result to the S3
-	// raw zone (see DESIGN.md). No scheduled/broad scraping.
+	// TODO: consume a request off the Kafka topic (confluent-kafka-go),
+	// start a CollectRouteWorkflow execution keyed by task_id, and
+	// commit the offset. No scheduled/broad scraping.
 	fmt.Println("flight-search-intelligence: collector (scaffold, not yet implemented)")
 }

@@ -14,11 +14,13 @@ See `DESIGN.md` for the full data-flow diagram and open decisions.
 - **Email intake** — SES receives an inbound route-request email
   (origin, destination, dates), parses it, and publishes an on-demand
   collection job onto a Kafka topic.
-- **Collector** (`cmd/collector`) — consumes that topic and fetches
-  *only* the requested route from providers, on-demand (no scheduled
-  crawl of routes nobody asked about), dropping the raw result in the
-  S3 raw zone; replies by email and makes the result available via
-  search-api once done.
+- **Collector** (`cmd/collector`) — consumes that topic and starts a
+  Temporal workflow per task, which fetches *only* the requested route
+  from providers, on-demand (no scheduled crawl of routes nobody asked
+  about), with built-in retry and, for multi-leg/complex requests,
+  fan-out into child workflows; drops the raw result in the S3 raw
+  zone and replies by email + makes it available via search-api once
+  done.
 - **ETL** (`etl/`) — a periodic Spark batch job cleans/dedupes
   whatever's accumulated since the last run and merges it into Delta
   Lake; dbt models the silver layer into an analytics-ready gold layer
@@ -58,8 +60,8 @@ read/write the same Postgres table pair directly (no gold layer, no
 sync, no miss-triggers-collection behavior), and Airflow only runs the
 nightly batch chain. There is no infra/deployment code at all right
 now — no Terraform, no Ansible roles, no Helm charts, no Dockerfiles —
-and no email intake or Kafka exist yet either. See the `TODO`s
-throughout.
+and no email intake, Kafka, or Temporal exist yet either. See the
+`TODO`s throughout.
 
 ## Local dev
 
