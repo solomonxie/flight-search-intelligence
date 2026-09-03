@@ -26,9 +26,10 @@ See `DESIGN.md` for the full data-flow diagram and open decisions.
   and the gold → serving-store sync.
 - **Search API** (`cmd/search-api`) — serves flexible, low-latency
   search (route, date range, airline, price, stops...) against the
-  Postgres serving store synced from the gold layer; a miss also
-  publishes a collection job onto the same Kafka topic email intake
-  uses, so browsing can pull in new routes too, not just email.
+  serving store synced from the gold layer (Postgres in prod, SQLite
+  for local dev); a miss also publishes a collection job onto the same
+  Kafka topic email intake uses, so browsing can pull in new routes
+  too, not just email.
 - **Infra** — self-managed on AWS EC2: Terraform provisions the
   instances, Ansible installs a self-managed Kubernetes cluster on
   them, and every service deploys as a Docker image via Helm charts
@@ -62,12 +63,17 @@ throughout.
 
 ## Local dev
 
+Target: the full stack runs locally on a MacBook M1 in a local
+Kubernetes cluster (k3d), fully testable end to end — no AWS account
+needed. MinIO substitutes for S3, SQLite for Postgres, and the
+collector runs against a mock fare provider instead of real ones. See
+`DESIGN.md`'s "Local development" section for the full plan; none of
+this tooling exists in the repo yet.
+
+Until then, the minimal loop that works today:
+
 ```sh
 docker compose up -d          # Postgres
 go run ./cmd/collector
 go run ./cmd/search-api
 ```
-
-Production is meant to run each service as a Docker image on
-Kubernetes rather than via `go run`/`docker compose`, once that
-infra exists — see `DESIGN.md`.
