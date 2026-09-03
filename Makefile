@@ -4,7 +4,7 @@ build:
 	go build ./...
 
 run-collector:
-	go run ./cmd/collector
+	go run ./cmd/collector -origin SFO -destination JFK -date 2026-12-05
 
 run-search-api:
 	go run ./cmd/search-api
