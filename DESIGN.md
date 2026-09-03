@@ -92,11 +92,11 @@ scrape volume to actual requests (see "Collection scope" below).
   the request email, parses route/dates/requester from it, and
   publishes a collection job onto the Kafka request topic.
 
-- **`cmd/search-api` (Go)** — normally read-only against the Postgres
-  serving store, but on a miss (route/date not yet collected) it also
-  publishes onto the same Kafka request topic and returns a "pending"
-  response rather than an empty one — the second of two producers into
-  that topic.
+- **`cmd/search-api` (Go)** — normally read-only against the serving
+  store (Postgres in prod, SQLite locally — see "Local development"),
+  but on a miss (route/date not yet collected) it also publishes onto
+  the same Kafka request topic and returns a "pending" response rather
+  than an empty one — the second of two producers into that topic.
 
 - **`cmd/collector` (Go)** — on-demand only: consumes the Kafka request
   topic (self-hosted via Strimzi — one job type, no fan-out/replay
@@ -122,8 +122,9 @@ scrape volume to actual requests (see "Collection scope" below).
   is event-driven, not Airflow-scheduled.)
 
 - **Serving sync** — a job (Spark write or small Go/CDC consumer) that
-  publishes the gold Delta tables into Postgres, so `search-api` reads
-  (the hit path, above) never query Delta Lake directly and stay
+  publishes the gold Delta tables into the serving store (Postgres in
+  prod, SQLite locally — see "Local development"), so `search-api`
+  reads (the hit path, above) never query Delta Lake directly and stay
   low-latency — not from the same raw table the collector writes, and
   not from Delta Lake directly.
 
@@ -163,3 +164,71 @@ search-api triggers collection on a miss, not just email.
   become available once collection + cleaning + dbt have all finished
   anyway, so the sync step isn't the bottleneck. Say so if you
   disagree.
+- **EC2 architecture**: not asked — worth flagging: if prod EC2 is
+  arm64 (Graviton) rather than x86_64, it's the same architecture as
+  local M1 builds, not just "also native" — removes a whole class of
+  arch-mismatch bugs, and Graviton is generally cheaper too. Nothing
+  in the stack (Kafka, Spark, Delta Lake, dbt, Go, Postgres) blocks
+  arm64. Defaulting to **arm64/Graviton** for this reason; say so if
+  x86_64 is actually needed for something not yet in the design.
+
+## Local development
+
+Goal: the whole pipeline runs on a MacBook M1, fully testable end to
+end, no AWS account required. Same Helm charts as prod throughout —
+local dev is a smaller, substituted deployment of the identical
+manifests, not a separate setup, so what works locally is evidence
+about what works in prod.
+
+- **Cluster**: k3d (k3s-in-Docker) — same distro as the prod default
+  (k3s), arm64-native on M1, fast to create/destroy. `k3d cluster
+  create` stands in for "Terraform + Ansible provisioning EC2"; the
+  same Helm charts deploy into it via a `values-local.yaml` override.
+- **Object storage**: MinIO (S3-compatible) replaces S3 — same API,
+  so Delta Lake/Spark code doesn't change, just the endpoint/creds.
+- **Serving store**: **SQLite, not Postgres** (resolved — keeping
+  local dev simple was explicitly chosen over cluster/prod parity
+  here). `search-api` and the serving-sync job need a small
+  storage-driver abstraction (SQLite locally, Postgres in prod) behind
+  one interface — the schema is simple enough that this shouldn't
+  need much divergence. This is the one deliberate non-parity point;
+  everything else below aims for real parity.
+- **Kafka**: same as prod, no substitution — Strimzi, single-broker
+  KRaft mode (no ZooKeeper), deployed into the local cluster with
+  lower resource requests/limits in `values-local.yaml`.
+- **Spark**: same as prod default, no substitution — the
+  Spark-on-Kubernetes operator runs inside the local cluster too
+  (not `local[*]` mode), affordable here since data volumes are tiny
+  (bounded by test-fixture requests, per "Collection scope").
+- **Email intake**: SES inbound can't run locally — it's an
+  AWS-managed delivery hop, not something to emulate. Local dev
+  exposes a small HTTP endpoint/CLI that accepts a raw email fixture
+  file and runs the same parsing code SES would trigger, publishing
+  onto the local Kafka topic exactly like prod. This tests everything
+  downstream of "an email arrived"; it doesn't test AWS's delivery of
+  the email itself, which isn't testable locally regardless.
+- **Collector — provider**: resolved — a mock/stub provider for local
+  dev and any automated tests, returning canned fares for known test
+  routes, selected via an env var (e.g. `PROVIDER=mock`). Keeps
+  repeated local/test runs from generating real scraping traffic
+  against actual providers. The same collector image runs the real
+  provider client in prod via the same env var.
+- **Images**: build natively for arm64 (M1 needs no cross-compilation/
+  emulation, and if prod EC2 is also arm64/Graviton per the item
+  above, local and prod images are literally the same architecture)
+  and load into k3d via `k3d image import` — no registry needed
+  locally.
+- **End-to-end test flow** (should be one scriptable command, not just
+  manual steps, so it also runs in CI):
+  1. Bring up the cluster + Helm-installed stack (Kafka, MinIO,
+     SQLite-backed search-api/collector/email-intake, Spark operator).
+  2. POST a sample raw-email fixture to the local email-intake
+     endpoint (exercises the email path), or query `search-api` for a
+     route that's a known miss (exercises the search-triggered path).
+  3. Watch it flow: Kafka → collector (mock provider) → MinIO raw zone
+     → Spark batch → Delta Lake (on MinIO) → dbt gold → sync → SQLite.
+  4. Query `search-api` for that route/date and assert the result.
+- **Sizing**: a single k3d node running Kafka (1 broker) + the Spark
+  operator + MinIO + a handful of small Go services should fit an M1
+  MacBook's unified memory at low resource requests — flagging as an
+  assumption to revisit if it turns out too heavy, not a blocker.
