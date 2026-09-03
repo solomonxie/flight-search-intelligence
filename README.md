@@ -40,7 +40,6 @@ See `DESIGN.md` for the full data-flow diagram and open decisions.
 |---|---|
 | `cmd/collector` | on-demand, per-route fare collection |
 | `cmd/search-api` | flight search service (also triggers collection on a miss) |
-| `internal/db/migrations` | Postgres (serving store) schema |
 | `etl/spark` | periodic cleaning job → Delta Lake |
 | `etl/dbt` | Delta Lake silver → gold analytics models |
 | `etl/airflow/dags` | periodic ETL + serving-sync orchestration |
@@ -50,7 +49,7 @@ See `DESIGN.md` for the full data-flow diagram and open decisions.
 Early scaffold, and currently batch-only/Postgres-only end to end —
 see `DESIGN.md` for the target architecture (email/search-triggered
 on-demand collection, Delta Lake, serving sync) this doesn't yet
-implement. Service entrypoints, one migration, and one file per ETL
+implement. Service entrypoints and one file per ETL
 tool are in place; the collector only does scheduled batch scrape of
 whatever it's pointed at (no on-demand/queue-driven mode yet), the
 Spark job writes plain files (no Delta Lake), dbt/search-api still
