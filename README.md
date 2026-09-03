@@ -49,19 +49,21 @@ See `DESIGN.md` for the full data-flow diagram and open decisions.
 
 ## Status
 
-Early scaffold, and currently batch-only/Postgres-only end to end —
-see `DESIGN.md` for the target architecture (email/search-triggered
-on-demand collection, Delta Lake, serving sync) this doesn't yet
-implement. Service entrypoints and one file per ETL
-tool are in place; the collector only does scheduled batch scrape of
-whatever it's pointed at (no on-demand/queue-driven mode yet), the
+Early scaffold — see `DESIGN.md` for the target architecture
+(email/search-triggered on-demand collection via Kafka/Temporal, Delta
+Lake, serving sync) this doesn't yet implement. The collector
+(`cmd/collector`) is the one piece with real logic: run directly, it
+fetches real fare offers from the Amadeus test API for one route/date
+and writes the raw JSON locally (see "Local dev" below) — no Kafka, no
+Temporal, no S3 yet, just the provider fetch proven out end to end.
+Everything else is still scaffold: `search-api` is unimplemented, the
 Spark job writes plain files (no Delta Lake), dbt/search-api still
-read/write the same Postgres table pair directly (no gold layer, no
-sync, no miss-triggers-collection behavior), and Airflow only runs the
-nightly batch chain. There is no infra/deployment code at all right
-now — no Terraform, no Ansible roles, no Helm charts, no Dockerfiles —
-and no email intake, Kafka, or Temporal exist yet either. See the
-`TODO`s throughout.
+assume a Postgres table pair (no gold layer, no sync, no
+miss-triggers-collection behavior), and Airflow only runs a nightly
+batch chain. There is no infra/deployment code at all right now — no
+Terraform, no Ansible roles, no Helm charts, no Dockerfiles — and no
+email intake, Kafka, or Temporal exist yet either. See the `TODO`s
+throughout.
 
 ## Local dev
 
@@ -72,10 +74,16 @@ collector runs against a mock fare provider instead of real ones. See
 `DESIGN.md`'s "Local development" section for the full plan; none of
 this tooling exists in the repo yet.
 
-Until then, the minimal loop that works today:
+Until then, the collector runs directly (no Docker, no cluster) against
+the real Amadeus Self-Service test API:
 
 ```sh
-docker compose up -d          # Postgres
-go run ./cmd/collector
-go run ./cmd/search-api
+cp .env.example .env          # fill in AMADEUS_CLIENT_ID/SECRET
+                               # (free: https://developers.amadeus.com/my-apps)
+go run ./cmd/collector -origin SFO -destination JFK -date 2026-12-05
 ```
+
+This fetches real (test-environment) fare offers, prints a summary, and
+writes the raw JSON response to `data/raw/`. It bypasses Kafka/Temporal/S3
+for now — see `DESIGN.md` "Collector task queue" for the queue-driven
+version this will grow into.
