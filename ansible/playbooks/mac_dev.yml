@@ -1,0 +1,5 @@
+---
+- name: Provision this Mac for flight-search-intelligence local dev
+  hosts: mac_dev
+  roles:
+    - mac_dev

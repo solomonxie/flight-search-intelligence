@@ -5,10 +5,9 @@
 //
 // This package never creates or alters schema — see DESIGN.md "Schema
 // ownership": that's DBA/ops tooling's job, not Go's, even here. Schema
-// lives in db/schema.sql, applied with the database's own tooling
-// (`make db-init`, or `sqlite3 ... < db/schema.sql` directly) before
-// this package's Open is ever called — Open fails fast, not silently,
-// if that hasn't happened yet.
+// lives in databases/sqlite/migrations/, applied with Flyway
+// (`make db-init`) before this package's Open is ever called — Open
+// fails fast, not silently, if that hasn't happened yet.
 package catalog
 
 import (
@@ -41,8 +40,9 @@ type SQLite struct {
 	db *sql.DB
 }
 
-// Open opens the SQLite database at path and checks that db/schema.sql
-// has already been applied — it does not create tables itself.
+// Open opens the SQLite database at path and checks that Flyway's
+// migrations (databases/sqlite/migrations/) have already been applied —
+// it does not create tables itself.
 func Open(path string) (*SQLite, error) {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -63,7 +63,7 @@ func checkSchema(db *sql.DB) error {
 		var exists int
 		if err := row.Scan(&exists); err != nil {
 			return fmt.Errorf(
-				"catalog: table %q not found — run `make db-init` first to apply db/schema.sql (%w)",
+				"catalog: table %q not found — run `make db-init` first to apply databases/sqlite/migrations (%w)",
 				table, err)
 		}
 	}

@@ -38,8 +38,11 @@ context while it's still searching.
 ## Try it now
 
 No account, no API key, nothing to configure beyond having Go and
-`sqlite3` installed. First time only, set up the local database (schema
-is applied with SQLite's own tooling, not Go — see `DESIGN.md` "Schema
+[Flyway](https://flywaydb.org) installed — `brew install flyway`, or
+`ansible-playbook ansible/playbooks/mac_dev.yml` to provision everything
+this needs at once. First time only, set up the local database (Flyway
+applies the versioned migrations under `databases/sqlite/migrations/` —
+schema is DBA/ops tooling's job, not Go's; see `DESIGN.md` "Schema
 ownership"):
 
 ```sh

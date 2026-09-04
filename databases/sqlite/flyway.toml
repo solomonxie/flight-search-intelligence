@@ -1,0 +1,10 @@
+# Flyway config for the local SQLite catalog (see DESIGN.md "Schema
+# ownership" — this is DBA/ops tooling, deliberately outside internal/catalog
+# and everything else Go owns). Run from the repo root:
+#   flyway -configFiles=databases/sqlite/flyway.toml migrate
+
+[environments.default]
+url = "jdbc:sqlite:data/flight_search.db"
+
+[flyway]
+locations = ["filesystem:databases/sqlite/migrations"]

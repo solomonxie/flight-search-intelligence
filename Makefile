@@ -1,16 +1,14 @@
-DB_PATH ?= data/flight_search.db
-
 .PHONY: build db-init run-collector run-search-api test
 
 build:
 	go build ./...
 
 # Schema is DBA/ops tooling's job, not Go's — see DESIGN.md "Schema
-# ownership". Applied directly with the database's own CLI, not a Go
-# binary; db/schema.sql is the one source of truth for the shape.
+# ownership". Flyway applies versioned migrations from
+# databases/sqlite/migrations/; requires the flyway CLI (brew install
+# flyway) on PATH.
 db-init:
-	mkdir -p $(dir $(DB_PATH))
-	sqlite3 $(DB_PATH) < db/schema.sql
+	flyway -configFiles=databases/sqlite/flyway.toml migrate
 
 run-collector:
 	go run ./cmd/collector -origin SFO -destination JFK -date 2026-12-05
