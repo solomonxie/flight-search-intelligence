@@ -145,12 +145,23 @@ func Search(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 	} else {
 		deps.recordOffers(ctx, p.Origin, p.Destination, p.DepartDate, baseOffers)
 	}
+	baseline := CandidateOutcome{Hub: "(direct)", Rank: 0}
 	if offer, dur, ok := pickCheapestFeasible(baseOffers, deps.Graph, p.MaxHours); ok {
 		r := Result{Path: []string{p.Origin, p.Destination}, PriceUSD: float64(offer.Price), DurationMinutes: int(dur.Minutes())}
 		best = &r
 		plan.FinalResult = append(plan.FinalResult, r)
+		baseline.Leg1 = &LegOutcome{Queried: true, PriceUSD: r.PriceUSD, QueriedAt: time.Now()}
+		baseline.LBUSD = r.PriceUSD
+		baseline.CombinedUSD = r.PriceUSD
+		baseline.Outcome = "kept"
 		log.Info("baseline found", "price_usd", r.PriceUSD, "duration_minutes", r.DurationMinutes)
+	} else {
+		baseline.Leg1 = &LegOutcome{Queried: true, QueriedAt: time.Now(), Reason: "no feasible offer"}
+		baseline.Outcome = "leg1_infeasible"
 	}
+	// Always rank[0], ahead of every hub candidate below — it's what
+	// every candidate is measured against, not just another option.
+	plan.CandidatesRanked = append(plan.CandidatesRanked, baseline)
 	sleepPacing(ctx, p.Delay)
 
 	// Step 1: candidate hubs, geometry-pruned (pure arithmetic, no
@@ -183,11 +194,11 @@ func Search(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 	// "Exploration algorithm" for the full derivation).
 	for i, c := range survivors {
 		if best != nil && c.lb >= best.PriceUSD {
-			markRemaining(plan, survivors[i:], "frontier_cutoff", "LB >= best.price")
+			markRemaining(plan, survivors[i:], i+1, "frontier_cutoff", "LB >= best.price")
 			break
 		}
 		if queriesUsed >= p.QueryBudget {
-			markRemaining(plan, survivors[i:], "budget_exhausted", "query budget exhausted")
+			markRemaining(plan, survivors[i:], i+1, "budget_exhausted", "query budget exhausted")
 			break
 		}
 
@@ -278,11 +289,14 @@ func Search(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 // markRemaining records the candidates a break in the main loop left
 // unqueried, so the audit trail accounts for every candidate that was
 // ranked, not just the ones actually scraped.
-func markRemaining(plan *Plan, rest []candidate, outcome, reason string) {
-	base := len(plan.CandidatesRanked) // fixed before the loop — appending inside it must not shift ranks
+// startRank is rest[0]'s 1-based rank among hub candidates — passed
+// explicitly rather than inferred from len(plan.CandidatesRanked), since
+// that slice also holds the rank-0 baseline entry and would otherwise
+// shift every hub rank off by one.
+func markRemaining(plan *Plan, rest []candidate, startRank int, outcome, reason string) {
 	for j, c := range rest {
 		plan.CandidatesRanked = append(plan.CandidatesRanked, CandidateOutcome{
-			Hub: c.hub, LBUSD: c.lb, Rank: base + j + 1,
+			Hub: c.hub, LBUSD: c.lb, Rank: startRank + j,
 			Outcome: outcome, Reason: reason,
 		})
 	}
