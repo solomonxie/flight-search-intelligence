@@ -35,10 +35,9 @@ func pickCheapestFeasible(offers []googleflights.Offer, graph *openflights.Graph
 // duration. Only leg1's single cheapest offer is considered — a
 // deliberate simplification (see DESIGN.md) that trades a little
 // optimality for not having to try every leg1×leg2 pair.
-func (d Deps) bestConnection(leg1 googleflights.Offer, leg2Offers []googleflights.Offer, p Params) (googleflights.Offer, time.Duration, bool) {
+func (d Deps) bestConnection(leg1 googleflights.Offer, leg2Offers []googleflights.Offer, p Params) (offer googleflights.Offer, total time.Duration, layoverDur time.Duration, found bool) {
 	var best googleflights.Offer
-	var bestTotal time.Duration
-	found := false
+	var bestTotal, bestLayover time.Duration
 	for _, o := range leg2Offers {
 		lay, ok := layover(leg1, o, d.Graph)
 		if !ok {
@@ -52,15 +51,15 @@ func (d Deps) bestConnection(leg1 googleflights.Offer, leg2Offers []googleflight
 		if !ok1 || !ok2 {
 			continue
 		}
-		total := leg1Dur + lay + leg2Dur
-		if total.Hours() > p.MaxHours {
+		tot := leg1Dur + lay + leg2Dur
+		if tot.Hours() > p.MaxHours {
 			continue
 		}
 		if !found || o.Price < best.Price {
-			best, bestTotal, found = o, total, true
+			best, bestTotal, bestLayover, found = o, tot, lay, true
 		}
 	}
-	return best, bestTotal, found
+	return best, bestTotal, bestLayover, found
 }
 
 // lowerBoundUSD is the admissible (never-overestimating) price estimate

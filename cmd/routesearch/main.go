@@ -36,15 +36,20 @@ func run() error {
 
 	origin := flag.String("origin", "", "origin IATA airport code, e.g. SFO (required)")
 	destination := flag.String("destination", "", "destination IATA airport code, e.g. JFK (required)")
-	date := flag.String("date", "", "departure date, YYYY-MM-DD (required)")
+	date := flag.String("date", "", "departure date, YYYY-MM-DD (required) — the flexible-date window's center, if -date-window-days > 0")
+	returnDate := flag.String("return-date", "", "return date, YYYY-MM-DD — triggers round-trip mode (bundled-fare vs. summed-one-ways comparison)")
 	maxHours := flag.Float64("max-hours", 30, "max tolerable total elapsed trip time, in hours")
-	budget := flag.Int("budget", 20, "max number of scrapes to spend on this search")
+	budget := flag.Int("budget", 20, "max number of hub-search scrapes to spend per direction")
 	minLayover := flag.Int("min-layover-minutes", 45, "minimum feasible layover, in minutes")
-	maxLayover := flag.Int("max-layover-minutes", 12*60, "maximum feasible layover, in minutes")
+	maxLayover := flag.Int("max-layover-minutes", 12*60, "maximum feasible layover, in minutes (raise this + -max-hours for a deliberate multi-day stopover)")
 	pricePerMile := flag.Float64("price-per-mile", 0.08, "fallback $/mile prior used when no cached price exists yet")
 	delay := flag.Duration("delay", 3*time.Second, "pacing delay between scrapes (stand-in for Temporal's durable timer)")
 	dbPath := flag.String("db", "data/flight_search.db", "SQLite store path (price cache + audit trail)")
 	openflightsDir := flag.String("openflights-dir", "data/openflights", "cache dir for the OpenFlights airports/routes dataset")
+
+	dateWindowDays := flag.Int("date-window-days", 0, "flexible-date sweep: +/- this many days around -date (0 disables flexible dates)")
+	dateStepDays := flag.Int("date-step-days", 1, "flexible-date sweep: sample every N days within the window")
+	tripLengthDays := flag.Int("trip-length-days", 0, "flexible round trip: fixed trip length; defaults to (-return-date minus -date) if both given")
 	flag.Parse()
 
 	if *origin == "" || *destination == "" || *date == "" {
@@ -73,25 +78,53 @@ func run() error {
 		Logger:  logger,
 	}
 
-	// No overall context deadline: this is a deliberately slow, days-SLA
-	// search (see DESIGN.md "Pacing") — only bounded by -budget, not by
-	// wall-clock time.
-	plan, err := routesearch.Search(context.Background(), deps, routesearch.Params{
-		Origin:            *origin,
-		Destination:       *destination,
-		DepartDate:        *date,
-		MaxHours:          *maxHours,
-		QueryBudget:       *budget,
-		MinLayoverMinutes: *minLayover,
-		MaxLayoverMinutes: *maxLayover,
-		PricePerMile:      *pricePerMile,
-		Delay:             *delay,
-	})
-	if err != nil {
-		return err
+	base := routesearch.Params{
+		Origin: *origin, Destination: *destination, DepartDate: *date,
+		MaxHours: *maxHours, QueryBudget: *budget,
+		MinLayoverMinutes: *minLayover, MaxLayoverMinutes: *maxLayover,
+		PricePerMile: *pricePerMile, Delay: *delay,
 	}
 
-	printSummary(plan)
+	// No overall context deadline anywhere below: this is a deliberately
+	// slow, days-SLA search (see DESIGN.md "Pacing") — only bounded by
+	// -budget/-date-window-days, not by wall-clock time.
+	ctx := context.Background()
+
+	switch {
+	case *dateWindowDays > 0:
+		tripLen := *tripLengthDays
+		if *returnDate != "" && tripLen == 0 {
+			d1, err1 := time.Parse("2006-01-02", *date)
+			d2, err2 := time.Parse("2006-01-02", *returnDate)
+			if err1 != nil || err2 != nil {
+				return fmt.Errorf("parsing -date/-return-date for -trip-length-days: %v / %v", err1, err2)
+			}
+			tripLen = int(d2.Sub(d1).Hours() / 24)
+		}
+		plan, err := routesearch.SearchFlexible(ctx, deps, routesearch.FlexibleParams{
+			Base: base, RoundTrip: *returnDate != "", TripLengthDays: tripLen,
+			WindowDays: *dateWindowDays, StepDays: *dateStepDays,
+		})
+		if err != nil {
+			return err
+		}
+		printFlexible(plan)
+
+	case *returnDate != "":
+		plan, err := routesearch.SearchRoundTrip(ctx, deps, base, *returnDate)
+		if err != nil {
+			return err
+		}
+		printRoundTrip(plan)
+
+	default:
+		plan, err := routesearch.Search(ctx, deps, base)
+		if err != nil {
+			return err
+		}
+		printSummary(plan)
+	}
+
 	return nil
 }
 
@@ -107,14 +140,91 @@ func printSummary(plan *routesearch.Plan) {
 	}
 	fmt.Printf("\n%d result(s) (Pareto set — price vs. duration):\n", len(plan.FinalResult))
 	for i, r := range plan.FinalResult {
-		kind := "single-ticket"
-		if r.SelfTransfer {
-			kind = "SEPARATE TICKETS — self-transfer risk"
-		}
-		fmt.Printf("  [%d] $%.0f, %dh%02dm, %s (%s)\n",
-			i+1, r.PriceUSD, r.DurationMinutes/60, r.DurationMinutes%60, joinPath(r.Path), kind)
+		fmt.Printf("  [%d] %s\n", i+1, describeResult(r))
 	}
 	fmt.Printf("\nFull audit trail saved to the store (route_search_plans, id=%s).\n", plan.RequestID)
+}
+
+func printRoundTrip(plan *routesearch.RoundTripPlan) {
+	fmt.Printf("\nRound trip %s -> %s, %s / %s. Queries used: %d (bundled=%v, outbound plan=%s, return plan=%s)\n",
+		plan.Origin, plan.Destination, plan.DepartDate, plan.ReturnDate, plan.QueriesUsed,
+		plan.BundledQueried, plan.OutboundPlanID, plan.ReturnPlanID)
+	if plan.BundledQueried {
+		if plan.BundledPriceUSD > 0 {
+			fmt.Printf("Bundled round-trip fare: $%.0f\n", plan.BundledPriceUSD)
+		} else {
+			fmt.Printf("Bundled round-trip fare: unavailable (%s)\n", plan.BundledReason)
+		}
+	}
+	if plan.Result == nil {
+		fmt.Println("\nNo feasible round trip found.")
+		return
+	}
+	r := plan.Result
+	if r.Bundled {
+		fmt.Printf("\nBest: $%.0f — bundled round-trip fare beat buying the two directions separately.\n", r.TotalPriceUSD)
+		return
+	}
+	fmt.Printf("\nBest: $%.0f — cheaper bought as two separate one-ways than the bundled fare:\n", r.TotalPriceUSD)
+	fmt.Printf("  Outbound: %s\n", describeResult(routesearch.Result{
+		Path: r.OutboundPath, PriceUSD: r.OutboundPriceUSD, DurationMinutes: r.OutboundDurationMinutes, SelfTransfer: r.OutboundSelfTransfer,
+	}))
+	fmt.Printf("  Return:   %s\n", describeResult(routesearch.Result{
+		Path: r.ReturnPath, PriceUSD: r.ReturnPriceUSD, DurationMinutes: r.ReturnDurationMinutes, SelfTransfer: r.ReturnSelfTransfer,
+	}))
+	fmt.Printf("\nSee outbound/return plans (route_search_plans ids %s, %s) for each direction's full candidate table.\n",
+		plan.OutboundPlanID, plan.ReturnPlanID)
+}
+
+func printFlexible(plan *routesearch.FlexiblePlan) {
+	fmt.Printf("\nDate sweep (Phase A) — %d date point(s) tried:\n", len(plan.DateSweep))
+	fmt.Printf("%-12s %-12s %-9s %s\n", "Depart", "Return", "Price $", "Note")
+	for _, e := range plan.DateSweep {
+		price := ""
+		if e.PriceUSD > 0 {
+			price = fmt.Sprintf("%.0f", e.PriceUSD)
+		}
+		marker := ""
+		if e.DepartDate == plan.ChosenDepartDate && e.ReturnDate == plan.ChosenReturnDate {
+			marker = "<- chosen"
+		}
+		fmt.Printf("%-12s %-12s %-9s %s %s\n", e.DepartDate, e.ReturnDate, price, e.Reason, marker)
+	}
+
+	fmt.Printf("\nPhase B ran on %s", plan.ChosenDepartDate)
+	if plan.ChosenReturnDate != "" {
+		fmt.Printf(" / %s", plan.ChosenReturnDate)
+	}
+	fmt.Printf(" (anchored plan id=%s):\n", plan.AnchoredPlanID)
+
+	switch {
+	case plan.RoundTripResult != nil:
+		r := plan.RoundTripResult
+		if r.Bundled {
+			fmt.Printf("Best: $%.0f (bundled round-trip fare)\n", r.TotalPriceUSD)
+		} else {
+			fmt.Printf("Best: $%.0f (outbound $%.0f + return $%.0f, bought separately)\n",
+				r.TotalPriceUSD, r.OutboundPriceUSD, r.ReturnPriceUSD)
+		}
+	case plan.OneWayResult != nil:
+		fmt.Printf("Best: %s\n", describeResult(*plan.OneWayResult))
+	default:
+		fmt.Println("No feasible itinerary found on the chosen date.")
+	}
+}
+
+func describeResult(r routesearch.Result) string {
+	kind := "single-ticket"
+	if r.SelfTransfer {
+		kind = "SEPARATE TICKETS — self-transfer risk"
+	}
+	stopover := ""
+	if r.Stopover {
+		stopover = fmt.Sprintf(" [STOPOVER: %dh%02dm layover, not priced — factor in lodging yourself]",
+			r.LayoverMinutes/60, r.LayoverMinutes%60)
+	}
+	return fmt.Sprintf("$%.0f, %dh%02dm, %s (%s)%s",
+		r.PriceUSD, r.DurationMinutes/60, r.DurationMinutes%60, joinPath(r.Path), kind, stopover)
 }
 
 // printCandidates prints the full audit-trail table — rank 0 is always
