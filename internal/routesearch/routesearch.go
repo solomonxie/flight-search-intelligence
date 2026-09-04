@@ -19,9 +19,9 @@ import (
 	"sort"
 	"time"
 
-	"flight-search-intelligence/googleflights"
-	"flight-search-intelligence/openflights"
-	"flight-search-intelligence/store"
+	"flight-search-intelligence/internal/googleflights"
+	"flight-search-intelligence/internal/openflights"
+	"flight-search-intelligence/internal/store"
 )
 
 // Params is one user request's constraints. One-way only for now — see
