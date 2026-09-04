@@ -257,6 +257,287 @@ the "SQLite locally, Postgres in prod" split already decided for the
 serving store, so local dev doesn't need a second Postgres instance
 just for Temporal's own persistence.
 
+## Cheap multi-leg route search: how "complex" requests decide what to fetch
+
+Elaborates the "Complex" branch of `CollectRouteWorkflow` above: when and
+how it decides a plain A→B search isn't enough, and specifically *which*
+child leg-searches to fan out into — "try every possible intermediate
+airport" is combinatorially impossible and would itself become the
+mass-crawl "Collection scope" rules out.
+
+**Reframing the problem**: this is not a shortest-path search over a graph
+already in hand — it's a resource-constrained shortest path (RCSP) problem
+over a graph that must be *discovered by scraping, one edge at a time,
+under a hard query budget*. Every edge (a leg's price) costs one real
+scrape (latency, scrape-load, block risk), so "explore" and "query" are
+the same action: the algorithm has to decide which edges are worth paying
+for, not just how to search a graph it already has.
+
+- **Nodes**: (airport, time), not just airport — a connection is only
+  feasible if arrival + minimum connection time ≤ the next leg's
+  departure, and infeasible past a max-layover cutoff. A time-expanded
+  graph, not a plain airport graph.
+- **Edges**: one scraped leg (origin, destination, date) → price +
+  duration + concrete departure/arrival times (`googleflights.Offer.
+  Segments`, already returned today).
+- **Weight to minimize**: price.
+- **Hard constraints** (feasibility, not objectives, unlike price): total
+  elapsed time (departure to final arrival, layovers included) ≤ the
+  user's tolerable-hours cap; each connection's layover within [min, max]
+  minutes; optionally max stops.
+- **Baseline**: a plain A→B Google Flights search already finds Google's
+  own best *single-ticket* connections — the only value this feature adds
+  is trying **split-ticket / hidden-city combos** (separate one-way legs
+  through a hub) that price differently than a through-fare. Step 0 is
+  always the plain A→B search (1 scrape): both the answer-of-last-resort
+  and the price/duration bound everything else prunes against.
+
+**Bounding the search** (the actual "smart" part — otherwise this is an
+unbounded fan-out over every airport on Earth):
+
+1. **Geometry prunes before any scrape.** Estimate each candidate hub's
+   minimum possible detour from great-circle distance (haversine) and a
+   fixed cruise-speed assumption; discard any hub whose `A→hub` +
+   `hub→B` minimum flight time already exceeds the tolerable-hours cap
+   with zero layover. Pure arithmetic, no scraping — cuts "every airport
+   on Earth" to a short list before spending a single scrape.
+2. **Prior ranking, not exhaustive order.** Rank surviving candidates —
+   known major hubs near the great-circle path first, then airports
+   already seen for this region in the local store — and explore
+   best-first. A good split-ticket price found early tightens the
+   pruning bound for everything explored after it.
+3. **Cache before scrape.** Check the local store for a recent-enough row
+   for the exact (origin, destination, date) before fetching — the
+   "repeat value comes from accumulation" property already claimed in
+   "Collection scope," made literal.
+4. **A\*-style admissible pruning.** Only fetch `hub→B` once `A→hub`'s
+   cheapest fare is in hand: if that price plus a cheap lower-bound
+   estimate for `hub→B` (last-seen price for that pair, or a
+   price-per-mile prior) is already ≥ the current best full price, skip
+   the second scrape entirely — half the candidate's cost avoided
+   without ever fetching it.
+5. **Hard query budget.** A fixed cap on scrapes per user request
+   (default: 20) regardless of candidate-list size. An anytime algorithm:
+   if the budget runs out, return the best feasible combo found so far,
+   never search exhaustively — the cap is what keeps this from becoming
+   the mass-crawl "Collection scope" rules out.
+6. **Depth cap.** 1-stop split-ticket combos by default; 2-stop only
+   behind an explicit "aggressive search" flag — cost grows
+   multiplicatively per extra hop, and so does self-transfer risk (below),
+   for typically thin additional savings.
+
+### Exploration algorithm
+
+The six techniques above are the intuition; this is the algorithm itself,
+stated precisely enough to implement without re-deriving it.
+
+**Class**: best-first branch-and-bound with lazy, budgeted edge
+evaluation — A* where "expanding a node" costs a scrape instead of being
+free, so the frontier order also decides *which edges get paid for at
+all*, not just the order results come back in.
+
+**State**: for the 1-stop case, a state is just a candidate hub `h`
+(the path is fixed: `A → h → B`). Generalizing to 2+ stops, a state
+becomes a label `(node, arrival_time, price_so_far, duration_so_far)` —
+see "Generalizing beyond 1-stop" below.
+
+**Bound functions** (per candidate hub `h`):
+- `g(h) = ` actual price of `A→h`, once scraped — before that, undefined.
+- `hEst(h) = ` an *admissible* (never-overestimating) lower bound on the
+  cheapest possible `h→B`: a cached recent price for that exact leg if
+  the local store has one, else `great_circle_miles(h, B) × min_price_per_mile`,
+  where `min_price_per_mile` is a deliberately low global constant (or the
+  cheapest $/mile actually observed so far, whichever is lower) — it must
+  underestimate, or every pruning step below becomes unsound.
+- `f(h) = g(h) + hEst(h)` once `g(h)` is known; before `A→h` is scraped,
+  use `LB(h) = est(A→h) + hEst(h)` (both sides estimated) to rank
+  candidates that haven't been queried yet at all.
+
+**Main loop**:
+
+```
+best          ← baseline direct A→B search              // 1 query, seeds the bound
+frontier      ← candidate hubs passing the geometry prune  // §1 above
+frontier      ← sort ascending by LB(h)                    // §2 above
+queries_used  ← 1
+
+while frontier not empty and queries_used < QUERY_BUDGET:
+    h ← frontier.pop_min()
+
+    if LB(h) ≥ best.price:
+        break                          // (*) — see optimality note below
+
+    leg1 ← scrape(A, h, date)          // query #1 for this candidate
+    queries_used ← queries_used + 1
+    if leg1 has no offer feasible within the elapsed-time budget so far:
+        continue                       // dead end, cost one query, not two
+
+    g1 ← cheapest feasible price in leg1
+    if g1 + hEst(h) ≥ best.price:
+        continue                      // leg 1 alone already forecloses winning; leg 2 skipped
+
+    if queries_used ≥ QUERY_BUDGET:
+        break
+
+    leg2 ← scrape(h, B, date + layover window)   // query #2, only spent when leg 1 leaves room to win
+    queries_used ← queries_used + 1
+
+    for (o1, o2) in feasible pairs from (leg1, leg2):   // layover ∈ [min, max], total time ≤ cap
+        candidate ← {price: o1.price + o2.price, duration: total(o1, o2), path: [o1, o2]}
+        if candidate is not dominated by any result already kept:
+            best ← best ∪ {candidate}, minus anything candidate now dominates   // Pareto update, §"Output"
+
+return best
+```
+
+**Why the `(*)` break is a full stop, not just a `continue`**: `frontier`
+is sorted ascending by an *admissible* bound, so the moment the best
+remaining `LB(h)` is no better than the current best price, every hub
+still in the frontier is provably no better either — this is the same
+argument that makes A* optimal. It is optimal **within the candidate set
+the geometry prune let through**, not a proof about every conceivable
+routing on Earth — a cheap fare through a hub the geometry prune excluded
+is a false negative this algorithm accepts by construction (see "Hub
+candidate source" below).
+
+**Two independent stopping conditions, doing different jobs**: the `(*)`
+bound-crossing break is what makes results *provably good* (given the
+candidate set); `QUERY_BUDGET` is what makes the algorithm *provably
+terminate quickly* regardless of how good the bounds turn out to be —
+early on, with no cached prices yet, `hEst` is loose and `(*)` may rarely
+trigger, so the budget is the real backstop, not a formality.
+
+**Anytime property**: because the frontier is processed best-first,
+`best` after any prefix of the loop is a reasonable answer — running out
+of `QUERY_BUDGET` mid-loop degrades result quality gracefully (it just
+means fewer, less-likely-to-win candidates went unexplored) rather than
+failing outright.
+
+**Generalizing beyond 1-stop**: 2-stop search reuses the identical loop,
+but a hub can now be reached via more than one first leg with different
+(price, duration) trade-offs, so "state" must become the full label
+`(node, arrival_time, price_so_far, duration_so_far)`, and a label is
+discarded the moment another label at the same node **dominates** it
+(≤ price, ≤ duration, compatible-or-earlier arrival) — standard
+multi-criteria label-setting (the same idea Dijkstra's relaxation step
+uses, extended from one scalar cost to a Pareto pair). 1-stop search
+above is the degenerate case of this where every path has exactly one
+intermediate node, so dominance checking collapses to plain Pareto
+membership on the final `(price, duration)` pair — which is exactly what
+the loop above already does.
+
+**Output**: a small ranked (price, duration) Pareto set, not one "best"
+answer — cheapest and fastest usually disagree. Flag any combo assembled
+from separate tickets through a hub as a **separate-ticket / self-transfer
+itinerary**: no through checked bags, no airline rebooking if the first
+leg is delayed — real risk the plain single-ticket baseline doesn't carry,
+never presented as equivalent to a through-fare without that flag.
+
+**Fits the existing design, no new infra**: this is exactly the "Complex"
+branch already sketched in `CollectRouteWorkflow` — it fans out into child
+`CollectRouteWorkflow` executions (one per leg), the same fan-out/fan-in
+and per-provider concurrency throttle already decided there. What's new
+is entirely workflow *logic* (candidate generation, geometry pruning, the
+A\*-style bound, the query budget), not new components.
+
+### Pacing, audit trail, and observability
+
+**Resolved: this is a days-SLA async workflow, not a minutes-SLA one.**
+People plan a trip like this months out; the response channel is email,
+sent once when the search finishes, not a live wait. That removes the
+latency pressure that would otherwise push toward parallel/burst
+dispatch (a real alternative considered and rejected — see below) and
+argues for the opposite: deliberately **space scrapes out** — a Temporal
+durable timer between each query (minutes to hours, not seconds) — which
+is strictly safer against anti-bot detection than firing legs back to
+back, and costs nothing extra since there's no deadline to race against.
+`QUERY_BUDGET` (see "Exploration algorithm" above) keeps its job of
+capping total scrape *volume* per request, but its reason for existing
+shifts from "bound latency" to "bound how much of this one user's search
+gets spread across how much of the provider's attention" — spacing
+solves politeness; the budget solves cost/scope.
+
+(A parallel-wave version of the same algorithm — precompute several
+candidates, dispatch their leg-queries concurrently — was considered and
+set aside: it trades query-count discipline for latency, and latency
+isn't scarce here. Worth revisiting only if the SLA ever tightens.)
+
+**Resolved: route-existence graph = OpenFlights, not a hardcoded hub
+list.** `airports.dat` (coordinates, for the geometry prune) and
+`routes.dat` (which airport pairs are actually flown) are static,
+bundled data — a one-time snapshot shipped with the repo, not scraped —
+and turn "every airport on Earth" into "airport pairs someone actually
+flies," a real graph instead of an arbitrary curated list. Distance from
+this graph stays a *feasibility filter* only (per "Exploration
+algorithm"'s bound functions) — never the price-ranking signal — for the
+reason already discussed: fare price doesn't track distance, and ranking
+by distance would bury exactly the anomalous-but-cheap routes this
+feature exists to find.
+
+**Audit trail**: every request's full candidate plan and outcome is
+recorded, not just the final answer — needed for "why didn't it find X"
+debugging, and cheap to keep given the low request volume ("Collection
+scope"). One `route_search_plans` row per request, written once as the
+plan and updated as results land:
+
+```json
+{
+  "request_id": "uuid",
+  "input": {"origin": "SFO", "destination": "NRT", "date": "2026-12-20",
+            "max_hours": 30, "max_stops": 1, "budget_usd": 800},
+  "candidates_considered": 4312,
+  "candidates_after_geometry_prune": 5187,
+  "candidates_ranked": [
+    {"hub": "ANC", "lb_usd": 410, "rank": 1,
+     "leg1": {"queried": true, "price_usd": 180, "queried_at": "..."},
+     "leg2": {"queried": true, "price_usd": 250},
+     "outcome": "kept", "combined_usd": 430},
+    {"hub": "SEA", "lb_usd": 460, "rank": 2,
+     "leg1": {"queried": true, "price_usd": 205},
+     "leg2": {"queried": false, "reason": "g1 + hEst >= best.price"},
+     "outcome": "pruned"},
+    {"hub": "PDX", "lb_usd": 610, "rank": 8,
+     "leg1": {"queried": false}, "leg2": {"queried": false},
+     "outcome": "frontier_cutoff", "reason": "LB >= best.price"}
+  ],
+  "final_result": ["...Pareto set..."],
+  "queries_used": 7,
+  "status": "done"
+}
+```
+
+Same JSON is also emitted as structured log lines (one per row-level
+event above — candidate generated, leg queried, candidate pruned, result
+kept), each tagged with the Temporal workflow/run ID, so a `route_search_
+plans` row and its log lines cross-reference each other.
+
+**Step-level visibility**: each row-level event above (generate
+candidates, query one leg, prune decision, Pareto update) is its own
+Temporal Activity, not buried inside one opaque "search" call — Temporal
+already records every activity's input/output/timing/retries in its Web
+UI (already planned in "Components"/"Local dev fit"), so this gets "the
+whole search visible step by step" for free from modeling the workflow
+this way, no new component required. The structured JSON logs above are
+the log-search half of the same requirement, tagged so they line up with
+that same Temporal history.
+
+**Open decisions** (defaults chosen the same way as elsewhere in this
+doc — say so if you'd rather change them):
+- **Query budget**: not asked — defaulting to **20 scrapes/request**,
+  now read as a cost/scope cap rather than a latency cap (see above).
+  Say so if you want it higher/lower, or configurable per request.
+- **Max depth**: not asked — defaulting to **1-stop only**, with 2-stop
+  behind an opt-in flag.
+- **Query spacing**: not asked — defaulting to a **random 5–30 minute
+  Temporal timer between scrapes**. Say so if you want it tighter/looser.
+- **Self-transfer risk disclosure**: not asked — defaulting to **always
+  labeling** any multi-ticket combo as such in the response, never
+  silently mixing it into the same list as single-ticket results.
+- **Log aggregation**: not asked — no new component yet; JSON-to-stdout
+  (readable via `kubectl logs` / journald + `jq`, or a laptop's terminal
+  in local dev) until request volume actually justifies a Loki/ELK-style
+  aggregator. Say so if you want one now instead of deferred.
+
 ## Open decisions
 
 **Resolved:** cloud = AWS EC2, self-managed compute; IaC = Terraform
