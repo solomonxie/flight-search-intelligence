@@ -104,7 +104,15 @@ scrape volume to actual requests (see "Collection scope" below).
 
 - **Email intake** (new, not yet in the repo) — SES inbound receives
   the request email, parses route/dates/requester from it, and
-  publishes a collection job onto the Kafka request topic.
+  publishes a collection job onto the Kafka request topic. **Resolved:
+  an LLM does both language-boundary conversions** — parsing the
+  free-form request email into structured `{origin, destination,
+  date(s), max_price, max_hours, max_stops, ...}`, and drafting the
+  final results email from the finished `Plan`/Pareto set (including
+  the separate-ticket risk disclosure) — rather than either being
+  regex/template logic. One LLM call per user request in each
+  direction, not per scrape, so it stays consistent with "on-demand,
+  not a mass crawl."
 
 - **`cmd/search-api` (Go)** — normally read-only against the serving
   store (Postgres in prod, SQLite locally — see "Local development"),
@@ -439,6 +447,83 @@ branch already sketched in `CollectRouteWorkflow` — it fans out into child
 and per-provider concurrency throttle already decided there. What's new
 is entirely workflow *logic* (candidate generation, geometry pruning, the
 A\*-style bound, the query budget), not new components.
+
+### Round trips and flexible dates
+
+Two gaps in scope, both real: everything above only ever searches one
+exact one-way date pair. Neither is a small tweak — both change what
+"a candidate" even means — so both get their own phase rather than being
+folded into the existing loop.
+
+**Round trips.** A round-trip fare is not always "outbound price + return
+price" — airlines/GDSs often bundle a round trip at a price different
+from (usually, but not always, cheaper than) the sum of two one-ways, the
+same way a hub connection can price differently than its two legs summed.
+So a round-trip request gets **three baselines** compared up front, all
+cheap (no hub search yet):
+
+1. **Bundled round-trip** — one query, both dates, Google's own
+   round-trip fare.
+2. **Sum of two one-ways** — one query per direction, priced
+   independently — sometimes cheaper, for the same reason a hub split can
+   beat a through-fare: the two directions aren't always priced by the
+   same inventory/carrier.
+3. Whichever of (1)/(2) wins becomes `best`, seeding the hub search
+   exactly like the one-way case's single baseline did.
+
+**Hub search runs per-direction, not combined.** Outbound and return each
+get their own independent 1-stop hub search (the existing algorithm,
+unmodified) rather than searching outbound-hub × return-hub jointly — the
+combined version is a real algorithmic generalization (a hub choice for
+one direction doesn't constrain the other, so it's just two independent
+instances of the existing search, not a harder search) but multiplies
+candidate count for a savings case that's already the thinner one (a
+per-direction hub beating a per-direction through-fare is rarer than a
+bundled round trip beating two one-ways). Deferred, not designed away —
+revisit if per-direction hub search alone doesn't earn its query budget.
+
+**Flexible dates.** The request's date(s) are a target, not an exact
+requirement — and per the days-not-minutes SLA already decided, there's
+time to spend confirming that rather than assuming it. This is a
+**two-phase search, not one bigger loop**, because the two things being
+explored (which dates, which hubs) have very different costs:
+
+- **Phase A — date sweep.** Query just the cheap baseline (direct, or
+  the 3-baseline round-trip comparison above) across a bounded date grid
+  around the requested date(s) — e.g. ±3 days each way. No hub search
+  yet: this phase is only trying to answer "which date(s) in this window
+  are actually cheap," and every query in it is exactly as cheap as the
+  single baseline query the one-way case already spends. A 7×7 grid
+  (±3 days outbound × ±3 days return) is 49 queries, worth it given a
+  days-scale SLA and the total absence of per-candidate hub-query cost in
+  this phase.
+- **Phase B — hub search anchored on the winner.** Take the best (or top
+  few) date combination(s) Phase A found and run the existing per-date
+  hub search (this section, above) *only* on those — not on every date in
+  the grid, which is what keeps this from multiplying hub-candidate count
+  by grid size. Hub search is expensive (multiple scrapes per candidate);
+  date search is one query per date; spending the budget on more dates
+  cheaply before spending it on more hubs expensively is the same
+  admissible-bound-before-you-pay principle as "Exploration algorithm"
+  above, just applied one level up.
+
+**Audit trail gets a sibling, not a replacement**: Phase A's date grid
+becomes a `date_sweep` array in `Plan` — same shape idea as
+`candidates_ranked` (which date, what it cost, which won) — sitting
+alongside it, since "why this date" and "why this hub" are both
+questions the audit trail exists to answer.
+
+**Open decisions** (same convention as elsewhere in this doc):
+- **Date window**: not asked — defaulting to **±3 days** each end that
+  was given. Say so if you want it wider/narrower, or asymmetric.
+- **Sweep budget**: not asked — defaulting to a **separate budget from
+  the hub QUERY_BUDGET** (not shared) — date-sweep queries are cheap
+  (one per date combo) and hub queries are expensive (multiple per
+  candidate), so they shouldn't compete for the same cap. Say so if you'd
+  rather they share one pool.
+- **Top-K dates into Phase B**: not asked — defaulting to **1** (just the
+  outright winner) rather than running hub search on several near-tied
+  dates. Say so if you want hub search hedged across, e.g., the top 3.
 
 ### Pacing, audit trail, and observability
 

@@ -65,7 +65,15 @@ type Result struct {
 	PriceUSD        float64  `json:"price_usd"`
 	DurationMinutes int      `json:"duration_minutes"`
 	SelfTransfer    bool     `json:"self_transfer"` // separate-ticket combo; see DESIGN.md "Output"
+	LayoverMinutes  int      `json:"layover_minutes,omitempty"`
+	Stopover        bool     `json:"stopover,omitempty"` // layover long enough it's really a mini-trip, not a connection
 }
+
+// stopoverThreshold: a layover past this is flagged as a deliberate
+// stopover rather than a connection — long enough to plausibly need a
+// hotel, which this tool doesn't price (no lodging data source), so it
+// only labels the option rather than costing it in.
+const stopoverThreshold = 6 * time.Hour
 
 // Plan is the full per-request audit trail (see DESIGN.md "Audit
 // trail") — persisted to the store as one JSON document.
@@ -249,7 +257,7 @@ func Search(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 		queriesUsed++
 		deps.recordOffers(ctx, c.hub, p.Destination, leg2Date, leg2Offers)
 
-		leg2, combined, feasible := deps.bestConnection(leg1, leg2Offers, p)
+		leg2, combined, layoverDur, feasible := deps.bestConnection(leg1, leg2Offers, p)
 		if err != nil || !feasible {
 			outcome.Leg2 = &LegOutcome{Queried: true, QueriedAt: time.Now(), Reason: "no feasible connection"}
 			outcome.Outcome = "leg2_infeasible"
@@ -269,6 +277,8 @@ func Search(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 			PriceUSD:        float64(total),
 			DurationMinutes: int(combined.Minutes()),
 			SelfTransfer:    true,
+			LayoverMinutes:  int(layoverDur.Minutes()),
+			Stopover:        layoverDur > stopoverThreshold,
 		}
 		plan.FinalResult = paretoInsert(plan.FinalResult, r)
 		if best == nil || r.PriceUSD < best.PriceUSD {
