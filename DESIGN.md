@@ -334,8 +334,13 @@ only way to catch it inferring something the email never actually said.
   as self-managed workloads on that same footprint. S3 and SES inbound
   are the two deliberate managed-AWS exceptions (mail receiving and
   object-storage durability aren't worth self-hosting) — everything
-  else is self-managed. Nothing under `infra/` exists yet — this is
-  target state, not current.
+  else is self-managed. `terraform/` is an empty placeholder — that
+  provisioning doesn't exist yet. `ansible/` does have one real role
+  today, `mac_dev` — but it manages a developer's own Mac (Flyway, Go,
+  sqlite3 for local dev), not the EC2 fleet above; see "Local
+  development". Both live as separate top-level directories, not
+  nested under a shared `infra/` (the older AWS CDK stack that used to
+  live there was removed by request — see the top of this doc).
 
 ## Schema ownership
 
@@ -356,12 +361,37 @@ different, more-privileged DB credential than the app's own runtime
 user gets). Conflating them into one Go binary's startup path is
 exactly the anti-pattern this avoids.
 
-**Today (SQLite, local dev)**: `db/schema.sql` is the one source of
-truth for `flight_prices`/`route_search_plans`'s shape — plain DDL, no
-Go involved in applying it. `make db-init` (or directly, `sqlite3
-data/flight_search.db < db/schema.sql`) applies it using SQLite's own
-CLI. `internal/catalog.Open` checks both tables exist and fails fast
-with a pointer back to `make db-init` if not — a read (`SELECT ... FROM
+**Resolved: Flyway, versioned migrations from day one, folder pattern
+`databases/<db>/`.** Not a diff-based/declarative tool (Liquibase-style
+auto-generated diffs, or Atlas) — explicit, hand-written, versioned SQL
+files applied in strict order is the whole point: less surface for a
+tool's own dialect-translation logic to get a migration subtly wrong
+across versions. `flyway_schema_history` (a table Flyway itself creates
+in the target database) tracks exactly which migrations have run.
+
+```
+databases/
+  sqlite/
+    flyway.toml          # [environments.default].url + [flyway].locations
+    migrations/
+      V001__create_flight_prices.sql
+      V002__create_route_search_plans.sql
+  postgres/               # doesn't exist yet — same pattern, when prod needs it
+    flyway.toml
+    migrations/
+```
+
+Naming is Flyway's own required format, not a style choice:
+`V<version>__<description>.sql` — the double underscore is the
+separator Flyway parses on; a single underscore fails to parse.
+
+**Today (SQLite, local dev)**: `make db-init` runs
+`flyway -configFiles=databases/sqlite/flyway.toml migrate`. Verified
+live: creates `flyway_schema_history`, applies both migrations in
+order, `flyway info` shows both as `Success`, and `cmd/collector`/
+`cmd/routesearch` read/write the result normally afterward.
+`internal/catalog.Open` checks both tables exist and fails fast with a
+pointer back to `make db-init` if not — a read (`SELECT ... FROM
 sqlite_master`), not schema management, so it doesn't cross the line
 above; it just refuses to silently proceed against a database that was
 never set up.
@@ -369,31 +399,26 @@ never set up.
 **Target (Postgres in prod, on the Helm/Kubernetes stack already
 decided)**: the same principle, realized as a **Helm pre-install/
 pre-upgrade hook Job** — a one-shot Kubernetes Job, gated to complete
-before the application Deployment rolls out, running a dedicated
-migration tool (e.g. `golang-migrate/migrate`, Flyway, Atlas — not
-decided yet, see below) against versioned migration files. Schema
-application becomes an infra artifact (a Job spec + migration files),
+before the application Deployment rolls out, running the official
+`flyway/flyway` image against `databases/postgres/migrations/`. Schema
+application stays an infra artifact (a Job spec + migration files),
 never application runtime code, in prod exactly as in local dev.
 
-**Today's `db/schema.sql` is one flat file, not versioned migrations —
-deliberately, for now.** The schema has never evolved yet (only ever
-been created once); versioned up/down migration files earn their keep
-once there's an actual second change to sequence after the first.
-Revisit when that happens, or before adopting Postgres in prod,
-whichever comes first.
+**Provisioning Flyway itself** is a dev-machine/CI setup step, not
+something this repo's own tooling installs — consistent with the rest
+of "Schema ownership": the migration tool is infra/ops-provisioned, not
+something Go (or any app-side script) pulls in for itself. Locally,
+that's `ansible/roles/mac_dev` (`ansible-playbook
+ansible/playbooks/mac_dev.yml`, or `brew install flyway go sqlite3` by
+hand — see `ansible/manual_mac_dev.sh`); in CI/prod, the `flyway/flyway`
+Docker image.
 
 **Open decisions**:
-- **Migration tool**: not asked — genuinely undecided (unlike most
-  "not asked" items elsewhere in this doc, this one has no default
-  applied yet). `golang-migrate/migrate` is the most common choice in a
-  Go-shaped stack; Atlas is the more modern declarative alternative.
-  Pick when a Postgres migration actually needs to be sequenced, not
-  before.
 - **Least-privilege DB credentials**: not asked — a hardened setup
   gives the app's own runtime Postgres user no DDL rights at all,
-  separate from the migration tool's credential. Doesn't apply to
-  SQLite (no user/permission model) — a Postgres-in-prod item, flagged
-  for when that exists.
+  separate from Flyway's own credential. Doesn't apply to SQLite (no
+  user/permission model) — a Postgres-in-prod item, flagged for when
+  that exists.
 
 ## Collector task queue: Kafka → Temporal
 

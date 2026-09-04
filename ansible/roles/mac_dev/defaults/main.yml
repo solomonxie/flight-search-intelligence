@@ -1,0 +1,7 @@
+---
+# Homebrew formulae this project's local dev needs. flyway pulls in
+# openjdk as its own Homebrew dependency automatically.
+mac_dev_brew_packages:
+  - go
+  - flyway
+  - sqlite3
