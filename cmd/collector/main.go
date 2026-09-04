@@ -1,11 +1,15 @@
 // Command collector fetches real flight fares for one route/date by
-// scraping Google Flights and writes the raw result to a local file.
+// scraping Google Flights, in one of two modes:
 //
-// This is a light, direct-run version: no Kafka, no Temporal, no S3 — just
-// `go run ./cmd/collector -origin SFO -destination JFK -date 2026-12-05`
-// against real (live) fare data. See DESIGN.md "Collector task queue" for
-// the target on-demand/queue-driven architecture this will grow into; this
-// is step one, proving the provider fetch itself works.
+//   - Default: direct-run CLI, just
+//     `go run ./cmd/collector -origin SFO -destination JFK -date 2026-12-05`
+//     against real (live) fare data, no Kafka/queue involved — step one,
+//     proving the provider fetch itself works.
+//   - `-worker`: polls internal/catalog's agent_tasks table (worker.go)
+//     for tasks internal/agents' reconciler (cmd/email-intake -worker)
+//     dispatched, and runs them — see DESIGN.md "Agent loop" and
+//     internal/agents' package doc for why this is a plain poll loop
+//     against the store rather than a workflow-engine worker.
 package main
 
 import (
@@ -39,7 +43,15 @@ func run() error {
 	adults := flag.Int("adults", 1, "number of adult passengers")
 	outDir := flag.String("out-dir", "data/raw", "directory to write the raw HTML result into")
 	dbPath := flag.String("db", "data/flight_search.db", "SQLite serving-store path to write parsed offers into")
+	workerMode := flag.Bool("worker", false, "poll agent_tasks and run dispatched searches instead of the direct-run CLI (see DESIGN.md \"Agent loop\")")
+	pollInterval := flag.Duration("poll-interval", 15*time.Second, "how often to check for pending tasks when idle (worker mode only)")
+	concurrency := flag.Int("concurrency", 3, "max tasks to run at once (worker mode only)")
+	openflightsDir := flag.String("openflights-dir", "data/openflights", "cache dir for the OpenFlights airports/routes dataset (worker mode only)")
 	flag.Parse()
+
+	if *workerMode {
+		return runWorker(*dbPath, *openflightsDir, *pollInterval, *concurrency)
+	}
 
 	if *origin == "" || *destination == "" || *date == "" {
 		flag.Usage()
