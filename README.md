@@ -1,115 +1,54 @@
-# Flight Search Intelligence
+# Cheap Flight Finder
 
-A distributed flight price intelligence platform: users email a route
-request, which triggers a Go collector to fetch just that route
-on-demand (no broad/scheduled scraping); Spark processes the
-accumulating results into Delta Lake, dbt/Airflow turn that into an
-analytics-ready layer, and a Go API serves low-latency search against
-a synced serving store built from every route ever requested.
+> 🚧 Work in progress. The search engine itself is real and runs today
+> (see "Try it now" below) — the email-based product around it doesn't
+> exist yet.
 
-See `DESIGN.md` for the full data-flow diagram and open decisions.
+Finds flights cheaper than a plain search shows you, by trying things a
+single query misses: splitting a trip across two separate tickets
+through a connecting city, checking nearby dates for a better price,
+and comparing a bundled round-trip fare against buying both directions
+on their own. Eventually: email in a request in plain language —
+"sometime in December, budget around $800, traveling with an infant so
+nothing too long" — and get real options back, with room to add more
+context while it's still searching.
 
-## How it works
+## Features
 
-- **Email intake** — SES receives an inbound route-request email
-  (origin, destination, dates), parses it, and publishes an on-demand
-  collection job onto a Kafka topic.
-- **Collector** (`cmd/collector`) — consumes that topic and starts a
-  Temporal workflow per task, which fetches *only* the requested route
-  from providers, on-demand (no scheduled crawl of routes nobody asked
-  about), with built-in retry and, for multi-leg/complex requests,
-  fan-out into child workflows; drops the raw result in the S3 raw
-  zone and replies by email + makes it available via search-api once
-  done.
-- **ETL** (`etl/`) — a periodic Spark batch job cleans/dedupes
-  whatever's accumulated since the last run and merges it into Delta
-  Lake; dbt models the silver layer into an analytics-ready gold layer
-  (fare trends per requested route); Airflow orchestrates that chain
-  and the gold → serving-store sync.
-- **Search API** (`cmd/search-api`) — serves flexible, low-latency
-  search (route, date range, airline, price, stops...) against the
-  serving store synced from the gold layer (Postgres in prod, SQLite
-  for local dev); a miss also publishes a collection job onto the same
-  Kafka topic email intake uses, so browsing can pull in new routes
-  too, not just email.
-- **Infra** — self-managed on AWS EC2: Terraform provisions the
-  instances, Ansible installs a self-managed Kubernetes cluster on
-  them, and every service deploys as a Docker image via Helm charts
-  (no `infra/` directory exists yet — see `DESIGN.md`).
+- **Real fares, no paid API** — pulled live, directly from Google
+  Flights.
+- **Finds routes a plain search misses** — splitting a trip across two
+  separate one-way tickets through a connecting city sometimes beats the
+  official fare through that same city.
+- **Round-trip check** — compares a bundled round-trip fare against
+  buying both directions separately, keeps whichever actually works out
+  cheaper.
+- **Flexible dates** — sweeps a window of nearby dates first (real
+  swings of hundreds of dollars a few days apart are common) before
+  spending the more expensive route-hunting effort on the best one.
+- **Full transparency** — every route it considered, and why it was kept
+  or ruled out, is on the record — not just the final answer.
+- **Long layovers are flagged, not hidden** — in case a long layover is
+  something you'd plan around (a stopover) rather than pay to avoid.
+- **Planned**: email in a request in plain language, including the kind
+  of preference a form can't capture ("must be there for a specific
+  date," "traveling with a baby"), with the ability to add more context
+  while it's still working on it.
 
-## Layout
+## Try it now
 
-| Path | What |
-|---|---|
-| `cmd/collector` | on-demand, per-route fare collection |
-| `cmd/routesearch` | cheap multi-leg/split-ticket route search (see DESIGN.md) |
-| `cmd/search-api` | flight search service (also triggers collection on a miss) |
-| `googleflights` | the scraper both commands above fetch through |
-| `openflights` | static airport/route-existence reference data (hub candidate generation) |
-| `store` | local SQLite serving store + route-search audit trail |
-| `etl/spark` | periodic cleaning job → Delta Lake |
-| `etl/dbt` | Delta Lake silver → gold analytics models |
-| `etl/airflow/dags` | periodic ETL + serving-sync orchestration |
-
-## Status
-
-Early scaffold — see `DESIGN.md` for the target architecture
-(email/search-triggered on-demand collection via Kafka/Temporal, Delta
-Lake, serving sync) this doesn't yet implement. The collector
-(`cmd/collector`) is the one piece with real logic: run directly, it
-scrapes real fare offers from Google Flights for one route/date and
-writes the raw HTML locally (see "Local dev" below) — no Kafka, no
-Temporal, no S3 yet, just the provider fetch proven out end to end.
-Everything else is still scaffold: `search-api` is unimplemented, the
-Spark job writes plain files (no Delta Lake), dbt/search-api still
-assume a Postgres table pair (no gold layer, no sync, no
-miss-triggers-collection behavior), and Airflow only runs a nightly
-batch chain. There is no infra/deployment code at all right now — no
-Terraform, no Ansible roles, no Helm charts, no Dockerfiles — and no
-email intake, Kafka, or Temporal exist yet either. See the `TODO`s
-throughout.
-
-## Local dev
-
-Target: the full stack runs locally on a MacBook M1 in a local
-Kubernetes cluster (k3d), fully testable end to end — no AWS account
-needed. MinIO substitutes for S3, SQLite for Postgres, and the
-collector runs against a mock fare provider instead of real ones. See
-`DESIGN.md`'s "Local development" section for the full plan; none of
-this tooling exists in the repo yet.
-
-Until then, the collector runs directly (no Docker, no cluster), scraping
-Google Flights — no API key needed:
-
-```sh
-go run ./cmd/collector -origin SFO -destination JFK -date 2026-12-05
-```
-
-This fetches real fare offers, prints a summary, writes the raw HTML
-response to `data/raw/`, and parses the offers into `data/flight_search.db`
-(SQLite, table `flight_prices` — the shape `etl/dbt/models/staging/
-stg_flights.sql` expects) — skipping the Spark/Delta Lake/dbt gold pipeline
-for now, the same way it already skips Kafka/Temporal/S3. See `DESIGN.md`
-"Collector task queue" for the queue-driven version this will grow into,
-and `googleflights/` for how the scrape itself works (a reverse-engineered
-protobuf query param + plain HTTP, no headless browser — undocumented and
-can break if Google changes the format).
-
-`cmd/routesearch` runs the cheap multi-leg/split-ticket search directly
-the same way:
+No account, no API key, nothing to configure beyond having Go installed:
 
 ```sh
 go run ./cmd/routesearch -origin SFO -destination JFK -date 2026-12-05
 ```
 
-First run downloads and caches the OpenFlights airports/routes dataset
-into `data/openflights/` (~3.5MB, one-time). It scrapes the direct route
-as a baseline, geometry- and price-prunes hub candidates from that
-dataset, and spends up to `-budget` scrapes (default 20) trying to beat
-the baseline via a split-ticket hub connection — see DESIGN.md "Cheap
-multi-leg route search" for the full algorithm. `-delay` (default 3s)
-paces scrapes; production is a Temporal durable timer instead (minutes to
-hours — see "Pacing, audit trail, and observability"), not needed for a
-short interactive run. Every candidate considered, kept, or pruned (and
-why) is saved as one JSON row in `route_search_plans` in the same SQLite
-file — the audit trail for debugging "why didn't it find X".
+Add a return date for the round-trip comparison, and/or
+`-date-window-days` to sweep nearby dates too:
+
+```sh
+go run ./cmd/routesearch -origin YVR -destination PEK \
+  -date 2026-12-22 -return-date 2027-01-05 -date-window-days 15
+```
+
+See `DESIGN.md` for how it works under the hood and what's still ahead.

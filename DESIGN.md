@@ -20,15 +20,27 @@ scrape volume to actual requests (see "Collection scope" below).
 
 ```
  user email                search-api miss
-(route+dates)            (route/date not yet
-     │                       collected)
+(route+dates,             (route/date not yet
+ +any follow-up email)      collected)
+     │                            │
      ▼                            │
 ┌─────────────┐                   │
 │ email intake │                  │
 │ (SES inbound)│                  │
 └──────┬───────┘                  │
-       │ parse + publish          │ publish
-       ▼                          ▼
+       │ start, or signal an      │ start (simple case:
+       │ already-running agent    │ no LLM round-trip
+       ▼                          │ needed — see "Agent loop")
+      ┌──────────────────────────────┐
+      │   Agent loop (LLM control    │
+      │   loop) — see "Agent loop:   │
+      │   LLM drives the search"     │
+      │   below. Decides: dispatch a │
+      │   tool call, defer, or       │
+      │   finalize.                  │
+      └───────────────┬───────────────┘
+                       │ dispatch (a tool call)
+                       ▼
       ┌──────────────────────────────┐
       │   Kafka topic (Strimzi),     │
       │   key = route, msg = task    │
@@ -40,6 +52,11 @@ scrape volume to actual requests (see "Collection scope" below).
       │  starts a Temporal workflow  │
       │  execution per task          │
       └───────────────┬───────────────┘
+                       │ result examined by the
+                       │ agent loop above — may
+                       │ loop back to dispatch
+                       │ again with different
+                       │ parameters, or continue ▼
                        ▼
       ┌──────────────────────────────┐
       │            Temporal          │
@@ -79,6 +96,135 @@ scrape volume to actual requests (see "Collection scope" below).
                  └───────────────┘
 ```
 
+## Agent loop: LLM drives the search, Go stays narrow
+
+**Sequencing, stated up front so it isn't lost: this whole section is
+design-only, not a build order.** Right now, and until the deterministic
+Go side (`googleflights`, `openflights`, `routesearch`, `store`) is
+solid, no LLM gets wired in — the priority is polishing the free, local,
+deterministic primitives first. This section exists so that work isn't
+accidentally shaped in a way this target architecture can't absorb
+later — it changes *where the line is drawn*, not what to build next.
+
+**The reframing**: the backend is not "deterministic pipeline with an
+LLM bolted on at the email boundary" — it's an **agent loop**. An LLM
+takes the user's request (and any later follow-up email), turns it into
+concrete search parameters, decides what to run, and — this is the part
+a fixed pipeline can't do — **examines the result and decides whether
+it's actually good enough**, against constraints that were never going
+to survive being turned into typed Go struct fields. Two examples,
+verbatim the kind of judgment call this is for:
+
+- The algorithm reports Jan 7–30 as the cheapest window. The agent
+  knows (from the original email) the trip is over Christmas and that
+  matters to the user — cheapest-but-misses-Christmas isn't a candidate
+  at all, not a worse-ranked one. No `Params` field says "don't skip the
+  holiday the user is traveling for"; encoding every such thing as a
+  field is the trap this design explicitly avoids.
+- A follow-up email mentions a 1-year-old traveling with them. A 30-hour
+  itinerary that was perfectly fine as a number now needs to be
+  reconsidered — not because `MaxHours` should have been smaller from
+  the start (it was a fine constraint for the request as first
+  understood), but because new context changed what "good enough" means
+  mid-search.
+
+**Go code's job shrinks to match, deliberately.** It is not the job of
+`routesearch` to grow a field for every soft preference someone might
+email in — that path never ends and produces an ever-larger, still
+incomplete parameter list. Go code stays exactly what it is today: a
+small, fixed set of mechanical, typed-parameter primitives —
+`Search` (one-way + hub search), `SearchRoundTrip`, `SearchFlexible` —
+plus the not-yet-built booking-horizon defer. Each is a **tool** in the
+LLM-agent sense: a fixed name, a typed argument list, a structured
+result (`Plan` / `RoundTripPlan` / `FlexiblePlan`), nothing fuzzy in or
+out. The agent's job is picking *which* tool, with *what* arguments,
+given the current understanding of the request — and, after seeing the
+result, deciding whether to call a tool again with different arguments
+or to stop.
+
+**The loop itself**:
+1. **Form/update the spec.** Turn the email thread so far (initial
+   request + every follow-up) into a structured spec: the concrete,
+   machine-checkable part (origin, destination, date window, max price,
+   max hours, max stops...) *and* a running list of soft constraints in
+   plain language (e.g. "must be there for Christmas," "traveling with
+   an infant, avoid very long single itinerary") — the second list
+   doesn't become new Go fields; it stays something only the agent reads.
+2. **Decide the next action**: call one tool with a chosen set of
+   concrete arguments; defer (booking horizon, or "wait, the user might
+   still be adding context"); or finalize.
+3. **Dispatch and await.** A tool call is a Kafka message /
+   Temporal child workflow exactly as already designed — the agent
+   doesn't run `routesearch` itself, it starts the same
+   `CollectRouteWorkflow`-shaped task the rest of this document already
+   describes, and waits for its structured result.
+4. **Examine the result against the full spec** — concrete constraints
+   already got enforced by the Go side (a result violating `MaxHours`
+   simply isn't in `Plan.FinalResult`); the agent's own job here is
+   specifically the soft-constraint half: does the cheapest option
+   returned actually satisfy "must be there for Christmas," etc.? If
+   not, that's not "no results" — the deterministic search worked fine;
+   this is the layer above it disqualifying an option a fixed pipeline
+   would have shipped as "the answer."
+5. **Loop or finalize.** Not good enough → go to 2 with adjusted
+   arguments (e.g. exclude a date range, tighten `MaxHours`, rerun with
+   a return date now that one's known). Good enough, or the loop's own
+   budget below is exhausted → finalize: draft the results email (same
+   LLM-drafting idea already in "Components") and, for a not-fully-solved
+   case, say so honestly rather than presenting a partial answer as
+   final.
+
+**The loop degenerates gracefully for the simple case.** A precise,
+unambiguous request (most `search-api` misses, and plenty of plain
+emails) needs none of this back-and-forth — step 1 produces a spec with
+no soft constraints, step 2 picks the obvious tool and arguments, step 4
+has nothing extra to check, and it finalizes after one round. The agent
+loop is a superset of "just run the search," not a mandatory detour.
+
+**Continuous email / mid-flight interruption.** This is the part a
+one-shot "parse email, run search, send reply" design structurally can't
+do. Each request's agent loop is itself one long-running Temporal
+workflow (call it `TravelRequestAgentWorkflow`), keyed so email intake
+can find it again — a reply to an existing thread doesn't start a new
+request, it delivers a **Signal** into the workflow already running for
+that thread. On receiving one, the workflow updates its spec (step 1)
+and re-runs step 2 with the new information, whether it was sitting
+mid-dispatch, mid-defer-timer, or already finalized-but-still-watching-
+the-thread-briefly. A signal arriving while a tool call is already
+in flight doesn't need to hard-cancel it (Temporal supports that if it
+ever matters) — the simpler default is: let the in-flight call finish,
+then let the next decision (step 2) account for the new context before
+deciding whether that result still matters.
+
+**Termination is still bounded, same principle as the query budget, one
+level up.** An agent that can always decide "let's try one more idea"
+needs its own ceiling or it never stops: a cap on redispatch rounds and
+an overall query-budget-across-the-whole-loop (not per tool call) are
+both required, and hitting either forces finalize-with-what-you-have —
+same anytime-algorithm honesty the query budget already established for
+a single search, just scoped to the whole conversation instead of one
+call.
+
+**Audit trail gets a layer above `Plan`, not a replacement for it.**
+Every agent decision — the spec at that point, which tool was called
+with what arguments, and *why* (the stated reasoning for accepting or
+rejecting a result) — is its own logged entry, parallel to
+`candidates_ranked`. If anything this matters more than the mechanical
+audit trail: the deterministic part is checkable by rerunning it: the
+judgment calls are not, so the record of *why* the agent made one is the
+only way to catch it inferring something the email never actually said.
+
+**Open decisions**:
+- **Tool contract**: not asked — the four tools named above
+  (`Search`/`SearchRoundTrip`/`SearchFlexible`/defer), each taking
+  exactly the typed params already designed for it, nothing added. Say
+  so if a fifth tool turns out to be needed.
+- **Redispatch cap**: not asked — defaulting to **3 rounds** before
+  forced finalization. Say so if that's too tight or too loose once this
+  is actually built.
+- **LLM choice / call shape**: not asked — deferred entirely; not worth
+  deciding until the deterministic side this depends on is done.
+
 ## Collection scope
 
 - The collector never crawls broadly or on a fixed schedule across all
@@ -103,16 +249,14 @@ scrape volume to actual requests (see "Collection scope" below).
 ## Components
 
 - **Email intake** (new, not yet in the repo) — SES inbound receives
-  the request email, parses route/dates/requester from it, and
-  publishes a collection job onto the Kafka request topic. **Resolved:
-  an LLM does both language-boundary conversions** — parsing the
-  free-form request email into structured `{origin, destination,
-  date(s), max_price, max_hours, max_stops, ...}`, and drafting the
-  final results email from the finished `Plan`/Pareto set (including
-  the separate-ticket risk disclosure) — rather than either being
-  regex/template logic. One LLM call per user request in each
-  direction, not per scrape, so it stays consistent with "on-demand,
-  not a mass crawl."
+  the request email (initial or a follow-up on an existing thread) and
+  either starts or signals the request's agent workflow. Superseded by
+  "Agent loop: LLM drives the search" below, which is the fuller
+  version of this: the LLM isn't just parsing the request and drafting
+  the reply at the two edges, it's the thing deciding what to search and
+  whether the result is actually good enough, for the whole request, not
+  only at the boundary. Still not wired in yet — see that section's
+  "sequencing" note.
 
 - **`cmd/search-api` (Go)** — normally read-only against the serving
   store (Postgres in prod, SQLite locally — see "Local development"),
@@ -524,6 +668,108 @@ questions the audit trail exists to answer.
 - **Top-K dates into Phase B**: not asked — defaulting to **1** (just the
   outright winner) rather than running hub search on several near-tied
   dates. Say so if you want hub search hedged across, e.g., the top 3.
+
+**Deferred idea, not designed yet: land near the destination, cover the
+last leg by ground.** E.g. flying into Tianjin (TSN) and taking the
+intercity train into Beijing, rather than flying all the way into PEK.
+This is a genuinely different edge type from everything above — not
+another OpenFlights flight route, but a ground-transport hop with its
+own (currently nonexistent) distance/time/cost data source — so it needs
+its own candidate-generation approach (nearby-airport-by-radius, not
+route-existence) and its own cost model before it fits this algorithm.
+Flagged here rather than folded into "hub candidates," which it isn't.
+
+**Already covered, no new design needed**: a domestic first hop (e.g.
+Vancouver → Calgary/Toronto before the long-haul leg) is not a new case —
+it's exactly what the existing hub search already searches for. Any
+airport with an OpenFlights route both from the origin and to the
+destination is already a hub candidate today, domestic or not.
+
+### Booking horizon: dates too far out to price yet
+
+Observed directly, not theoretical: a flexible-date sweep for a date
+~15 months out came back **empty on every single date in the window** —
+not one route having no service, but nothing anywhere having fares yet.
+Airlines/GDSs publish schedules and fares roughly 10–12 months ahead,
+not indefinitely; past that horizon, "no offers" doesn't mean "no such
+flight," it means "ask again later." Today's code can't tell those two
+apart — it just returns empty either way, which is a wrong answer
+dressed as a right one for the too-early case, and (for a flexible
+sweep) burns a full window's worth of queries to learn nothing.
+
+**Detection is a date check, not a response-content guess.** Trying to
+infer "too early" from Google's response (which says nothing explicit
+either way) is unreliable and, worse, only knowable *after* spending the
+query. Checking `request_date − today > BOOKING_HORIZON_DAYS` first is
+cheap, reliable enough, and — critically — answerable before scraping
+anything: exactly the same "cheap arithmetic before an expensive query"
+shape as the geometry prune. `BOOKING_HORIZON_DAYS` is a deliberately
+approximate constant (carriers vary — full-service international
+carriers tend toward the long end, LCCs often load less far out), not a
+fact about any specific route.
+
+**What happens instead of searching**: rather than run (and get nothing
+from) a request that fails this check, the workflow **defers itself**:
+1. Compute a wake time — `request_date − BOOKING_HORIZON_DAYS` plus a
+   small safety buffer (fares aren't always loaded exactly on schedule).
+2. Sleep until then via a **Temporal durable timer** (`workflow.Sleep` /
+   a timer future) — the same mechanism "Pacing" above uses for
+   between-scrape delays, just at a scale of months instead of minutes.
+   This is exactly what makes it tractable at all: a durable timer
+   survives worker restarts and costs nothing while waiting, unlike a
+   process that would need to stay alive (or a cron job re-deriving
+   "is it time yet" on every tick) for the better part of a year.
+3. On waking, run the search normally. If it's still empty (a carrier
+   loaded a little later than the horizon constant assumed), retry on a
+   short backoff (e.g. daily) up to a capped number of attempts or until
+   the requested date itself has passed — same "give an honest answer
+   eventually, don't loop forever" principle as the query budget.
+4. Whichever response channel is waiting (email, or search-api's
+   "pending" state) gets notified once real results land — reusing the
+   existing "notify both response channels" completion step, not a new
+   one.
+
+**The user finds out immediately, not after a long silence**: the
+*first* response — email reply or search-api's pending state — says
+outright that the date is beyond the fare-publishing horizon and roughly
+when to expect a real answer, rather than either an empty result or no
+response at all until the timer fires. This is the email-drafting LLM
+call from "Components" being told about this specific case, not a new
+mechanism.
+
+**Audit trail**: a deferred request's `Plan`/`FlexiblePlan` gets a
+status like `"deferred_until_2027-10-15"` instead of `"done"` — so the
+audit trail correctly shows "hasn't actually searched yet, waiting," not
+a completed-but-empty search. In Temporal's Web UI the same thing is
+visible natively: a workflow sitting in a multi-month sleep is exactly
+as inspectable as one mid-scrape (see "Step-level visibility") — the
+long durable timer *is* the audit trail's runtime counterpart.
+
+**This depends on Temporal actually existing, unlike everything else
+implemented so far.** `cmd/routesearch`'s direct-run CLI has no way to
+"sleep for months" durably — a plain process can't outlive itself. Until
+Temporal is wired in (see "Collector task queue"), the honest interim
+behavior is just detecting the condition and saying so up front (rather
+than silently burning the query budget the way the Dec 2027 demo just
+did) — not attempting the defer/wake mechanism itself.
+
+**Open decisions**:
+- **`BOOKING_HORIZON_DAYS`**: not asked — defaulting to **330 days**
+  (~11 months), a common denominator across full-service carriers. Say
+  so if you want it per-carrier, configurable, or a different default.
+- **Safety buffer past the horizon**: not asked — defaulting to
+  **+14 days** past the raw horizon before the first wake-up attempt,
+  since fare loading isn't always exactly on schedule.
+- **Retry cap once within horizon**: not asked — defaulting to
+  **daily retries for up to 14 days**, then notify "still not found,
+  may need to check back yourself" rather than retrying indefinitely.
+- **Partial-window flexible requests**: not asked — a date-sweep window
+  straddling the horizon (some dates reachable now, some not) defaults
+  to **deferring the whole request** rather than splitting it into an
+  immediate sweep over the reachable dates plus a separate deferred
+  sweep over the rest. Simpler, at the cost of not getting the
+  already-reachable dates' prices right away. Say so if you'd rather it
+  split.
 
 ### Pacing, audit trail, and observability
 
