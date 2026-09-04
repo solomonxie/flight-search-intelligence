@@ -1,4 +1,4 @@
-.PHONY: build run-collector run-search-api test up down
+.PHONY: build run-collector run-search-api test
 
 build:
 	go build ./...
@@ -11,9 +11,3 @@ run-search-api:
 
 test:
 	go test ./...
-
-up:
-	docker compose up -d
-
-down:
-	docker compose down

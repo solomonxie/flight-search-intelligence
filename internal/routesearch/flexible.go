@@ -54,7 +54,7 @@ func SearchFlexible(ctx context.Context, deps Deps, p FlexibleParams) (*Flexible
 	requestID := fmt.Sprintf("FLEX-%s-%s-%d", p.Base.Origin, p.Base.Destination, time.Now().UnixNano())
 	log := deps.Logger.With("request_id", requestID)
 	plan := &FlexiblePlan{RequestID: requestID, Input: p, Status: "running"}
-	_ = deps.Store.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
+	_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
 
 	center, err := time.Parse("2006-01-02", p.Base.DepartDate)
 	if err != nil {
@@ -78,7 +78,7 @@ func SearchFlexible(ctx context.Context, deps Deps, p FlexibleParams) (*Flexible
 	best := cheapestDateSweepEntry(plan.DateSweep)
 	if best == nil {
 		plan.Status = "error: no feasible date in window"
-		_ = deps.Store.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
+		_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
 		return plan, fmt.Errorf("routesearch: %s", plan.Status)
 	}
 	plan.ChosenDepartDate = best.DepartDate
@@ -92,7 +92,7 @@ func SearchFlexible(ctx context.Context, deps Deps, p FlexibleParams) (*Flexible
 		rtPlan, err := SearchRoundTrip(ctx, deps, anchored, best.ReturnDate)
 		if err != nil {
 			plan.Status = fmt.Sprintf("error: phase B: %v", err)
-			_ = deps.Store.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
+			_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
 			return plan, err
 		}
 		plan.AnchoredPlanID = rtPlan.RequestID
@@ -101,7 +101,7 @@ func SearchFlexible(ctx context.Context, deps Deps, p FlexibleParams) (*Flexible
 		owPlan, err := Search(ctx, deps, anchored)
 		if err != nil {
 			plan.Status = fmt.Sprintf("error: phase B: %v", err)
-			_ = deps.Store.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
+			_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
 			return plan, err
 		}
 		plan.AnchoredPlanID = owPlan.RequestID
@@ -111,7 +111,7 @@ func SearchFlexible(ctx context.Context, deps Deps, p FlexibleParams) (*Flexible
 	}
 
 	plan.Status = "done"
-	_ = deps.Store.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
+	_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
 	log.Info("flexible search done")
 	return plan, nil
 }

@@ -1,8 +1,8 @@
-// Package store is the local-dev serving store: SQLite, standing in for
+// Package catalog is the local-dev serving store: SQLite, standing in for
 // the Postgres serving store DESIGN.md targets (see "Local development").
 // Collector writes here directly for now, skipping the Spark/Delta Lake/
 // dbt gold pipeline that will eventually sit in between.
-package store
+package catalog
 
 import (
 	"context"
@@ -61,16 +61,16 @@ type SQLite struct {
 func Open(path string) (*SQLite, error) {
 	if dir := filepath.Dir(path); dir != "." {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return nil, fmt.Errorf("store: creating db directory: %w", err)
+			return nil, fmt.Errorf("catalog: creating db directory: %w", err)
 		}
 	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
-		return nil, fmt.Errorf("store: opening %s: %w", path, err)
+		return nil, fmt.Errorf("catalog: opening %s: %w", path, err)
 	}
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("store: creating schema: %w", err)
+		return nil, fmt.Errorf("catalog: creating schema: %w", err)
 	}
 	return &SQLite{db: db}, nil
 }
@@ -87,7 +87,7 @@ func (s *SQLite) InsertFlightPrices(ctx context.Context, rows []FlightPrice) err
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("store: beginning transaction: %w", err)
+		return fmt.Errorf("catalog: beginning transaction: %w", err)
 	}
 	defer tx.Rollback()
 
@@ -96,7 +96,7 @@ func (s *SQLite) InsertFlightPrices(ctx context.Context, rows []FlightPrice) err
 			(origin, destination, airline, depart_date, return_date, price_cents, currency, source, scraped_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
-		return fmt.Errorf("store: preparing insert: %w", err)
+		return fmt.Errorf("catalog: preparing insert: %w", err)
 	}
 	defer stmt.Close()
 
@@ -105,7 +105,7 @@ func (s *SQLite) InsertFlightPrices(ctx context.Context, rows []FlightPrice) err
 			r.Origin, r.Destination, r.Airline, r.DepartDate, r.ReturnDate,
 			r.PriceCents, r.Currency, r.Source, r.ScrapedAt.UTC().Format(time.RFC3339),
 		); err != nil {
-			return fmt.Errorf("store: inserting row: %w", err)
+			return fmt.Errorf("catalog: inserting row: %w", err)
 		}
 	}
 
@@ -127,7 +127,7 @@ func (s *SQLite) CachedPriceCents(ctx context.Context, origin, destination, depa
 
 	var n sql.NullInt64
 	if err := row.Scan(&n); err != nil {
-		return 0, false, fmt.Errorf("store: reading cached price: %w", err)
+		return 0, false, fmt.Errorf("catalog: reading cached price: %w", err)
 	}
 	if !n.Valid {
 		return 0, false, nil
@@ -148,7 +148,7 @@ func (s *SQLite) SaveRouteSearchPlan(ctx context.Context, id, status string, pla
 			status = excluded.status, plan_json = excluded.plan_json`,
 		id, now, now, status, string(planJSON))
 	if err != nil {
-		return fmt.Errorf("store: saving route search plan: %w", err)
+		return fmt.Errorf("catalog: saving route search plan: %w", err)
 	}
 	return nil
 }

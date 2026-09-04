@@ -17,9 +17,9 @@ import (
 	"strings"
 	"time"
 
-	"flight-search-intelligence/internal/envs"
+	"flight-search-intelligence/internal/catalog"
+	"flight-search-intelligence/internal/common"
 	"flight-search-intelligence/internal/googleflights"
-	"flight-search-intelligence/internal/store"
 )
 
 func main() {
@@ -30,7 +30,7 @@ func main() {
 }
 
 func run() error {
-	_ = envs.Load(".env")
+	_ = common.Load(".env")
 
 	origin := flag.String("origin", "", "origin IATA airport code, e.g. SFO (required)")
 	destination := flag.String("destination", "", "destination IATA airport code, e.g. JFK (required)")
@@ -84,20 +84,20 @@ func run() error {
 }
 
 // saveOffers persists parsed offers as etl/dbt's raw.flight_prices shape
-// (see store.FlightPrice) into the local SQLite serving-store stand-in —
+// (see catalog.FlightPrice) into the local SQLite serving-store stand-in —
 // skipping the Spark/Delta Lake/dbt gold pipeline DESIGN.md targets, for
 // now, the same way this collector already skips Kafka/Temporal/S3.
 func saveOffers(dbPath, origin, destination, departDate, returnDate string, offers []googleflights.Offer) error {
-	db, err := store.Open(dbPath)
+	db, err := catalog.Open(dbPath)
 	if err != nil {
 		return err
 	}
 	defer db.Close()
 
 	scrapedAt := time.Now()
-	rows := make([]store.FlightPrice, len(offers))
+	rows := make([]catalog.FlightPrice, len(offers))
 	for i, o := range offers {
-		rows[i] = store.FlightPrice{
+		rows[i] = catalog.FlightPrice{
 			Origin:      origin,
 			Destination: destination,
 			Airline:     strings.Join(o.Airlines, ","),

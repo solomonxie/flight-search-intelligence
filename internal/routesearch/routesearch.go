@@ -19,9 +19,9 @@ import (
 	"sort"
 	"time"
 
+	"flight-search-intelligence/internal/catalog"
 	"flight-search-intelligence/internal/googleflights"
 	"flight-search-intelligence/internal/openflights"
-	"flight-search-intelligence/internal/store"
 )
 
 // Params is one user request's constraints. One-way only for now — see
@@ -94,7 +94,7 @@ type Plan struct {
 type Deps struct {
 	Flights *googleflights.Client
 	Graph   *openflights.Graph
-	Store   *store.SQLite
+	Catalog *catalog.SQLite
 	Logger  *slog.Logger
 }
 
@@ -125,7 +125,7 @@ func Search(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 	log := deps.Logger.With("request_id", requestID)
 	plan := &Plan{RequestID: requestID, Input: p, Status: "running"}
 
-	if err := deps.Store.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan)); err != nil {
+	if err := deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan)); err != nil {
 		log.Warn("saving initial plan failed", "error", err)
 	}
 
@@ -133,7 +133,7 @@ func Search(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 	destination, ok2 := deps.Graph.Airport(p.Destination)
 	if !ok1 || !ok2 {
 		plan.Status = fmt.Sprintf("error: unknown airport (origin ok=%v, destination ok=%v)", ok1, ok2)
-		_ = deps.Store.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
+		_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
 		return plan, fmt.Errorf("routesearch: %s", plan.Status)
 	}
 
@@ -289,7 +289,7 @@ func Search(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 
 	plan.QueriesUsed = queriesUsed
 	plan.Status = "done"
-	if err := deps.Store.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan)); err != nil {
+	if err := deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan)); err != nil {
 		log.Warn("saving final plan failed", "error", err)
 	}
 	log.Info("search done", "queries_used", queriesUsed, "results", len(plan.FinalResult))
