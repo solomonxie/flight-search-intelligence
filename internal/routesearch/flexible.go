@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"flight-search-intelligence/googleflights"
+	"flight-search-intelligence/internal/googleflights"
 )
 
 // DateSweepEntry is one date (or date pair) tried in Phase A of a

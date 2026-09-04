@@ -3,8 +3,8 @@ package routesearch
 import (
 	"time"
 
-	"flight-search-intelligence/googleflights"
-	"flight-search-intelligence/openflights"
+	"flight-search-intelligence/internal/googleflights"
+	"flight-search-intelligence/internal/openflights"
 )
 
 // location returns iata's IANA timezone, falling back to UTC if unknown —

@@ -17,11 +17,11 @@ import (
 	"os"
 	"time"
 
-	"flight-search-intelligence/envs"
-	"flight-search-intelligence/googleflights"
-	"flight-search-intelligence/openflights"
-	"flight-search-intelligence/routesearch"
-	"flight-search-intelligence/store"
+	"flight-search-intelligence/internal/envs"
+	"flight-search-intelligence/internal/googleflights"
+	"flight-search-intelligence/internal/openflights"
+	"flight-search-intelligence/internal/routesearch"
+	"flight-search-intelligence/internal/store"
 )
 
 func main() {

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"flight-search-intelligence/googleflights"
+	"flight-search-intelligence/internal/googleflights"
 )
 
 // RoundTripResult is the combined outcome: either Google's own bundled

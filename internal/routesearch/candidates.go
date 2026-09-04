@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	"flight-search-intelligence/googleflights"
-	"flight-search-intelligence/openflights"
-	"flight-search-intelligence/store"
+	"flight-search-intelligence/internal/googleflights"
+	"flight-search-intelligence/internal/openflights"
+	"flight-search-intelligence/internal/store"
 )
 
 // pickCheapestFeasible returns the cheapest offer whose real (timezone-
