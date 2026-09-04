@@ -18,7 +18,7 @@ import (
 	"time"
 
 	"github.com/solomonxie/flight-search-intelligence/amadeus"
-	"github.com/solomonxie/flight-search-intelligence/envfile"
+	"github.com/solomonxie/flight-search-intelligence/envs"
 )
 
 func main() {
@@ -29,7 +29,7 @@ func main() {
 }
 
 func run() error {
-	_ = envfile.Load(".env")
+	_ = envs.Load(".env")
 
 	origin := flag.String("origin", "", "origin IATA airport code, e.g. SFO (required)")
 	destination := flag.String("destination", "", "destination IATA airport code, e.g. JFK (required)")
