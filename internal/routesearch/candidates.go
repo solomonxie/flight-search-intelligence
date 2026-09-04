@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
+	"flight-search-intelligence/internal/catalog"
 	"flight-search-intelligence/internal/googleflights"
 	"flight-search-intelligence/internal/openflights"
-	"flight-search-intelligence/internal/store"
 )
 
 // pickCheapestFeasible returns the cheapest offer whose real (timezone-
@@ -67,7 +67,7 @@ func (d Deps) bestConnection(leg1 googleflights.Offer, leg2Offers []googleflight
 // recent price for this exact leg if the store has one, else a crude
 // distance × $/mile prior.
 func (d Deps) lowerBoundUSD(ctx context.Context, origin, destination, date string, distanceMiles, pricePerMile float64) float64 {
-	if cents, ok, err := d.Store.CachedPriceCents(ctx, origin, destination, date); err == nil && ok {
+	if cents, ok, err := d.Catalog.CachedPriceCents(ctx, origin, destination, date); err == nil && ok {
 		return float64(cents) / 100.0
 	}
 	return distanceMiles * pricePerMile
@@ -103,9 +103,9 @@ func (d Deps) recordOffers(ctx context.Context, origin, destination, date string
 		return
 	}
 	now := time.Now()
-	rows := make([]store.FlightPrice, len(offers))
+	rows := make([]catalog.FlightPrice, len(offers))
 	for i, o := range offers {
-		rows[i] = store.FlightPrice{
+		rows[i] = catalog.FlightPrice{
 			Origin: origin, Destination: destination,
 			Airline:    strings.Join(o.Airlines, ","),
 			DepartDate: date,
@@ -115,7 +115,7 @@ func (d Deps) recordOffers(ctx context.Context, origin, destination, date string
 			ScrapedAt:  now,
 		}
 	}
-	if err := d.Store.InsertFlightPrices(ctx, rows); err != nil {
+	if err := d.Catalog.InsertFlightPrices(ctx, rows); err != nil {
 		d.Logger.Warn("recording scraped offers failed", "error", err)
 	}
 }

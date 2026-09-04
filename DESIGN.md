@@ -9,8 +9,11 @@ Ansible configures them (installs/joins Kubernetes, per the `ansible`
 skill's role conventions), every component ships as a Docker image,
 and Kubernetes (self-managed control plane on that EC2 fleet) runs
 them via Helm charts. This replaces the AWS CDK stack previously under
-`infra/`, which was removed by request. `docker-compose.yml` is local
-dev only.
+`infra/`, which was removed by request. No `docker-compose.yml` exists
+right now either — it described a standalone Postgres service nothing
+actually depended on yet (local dev uses SQLite today — see "Local
+development"); removed rather than leaving unused scaffold, revisit
+once a service genuinely needs it locally.
 
 ## Data flow
 
