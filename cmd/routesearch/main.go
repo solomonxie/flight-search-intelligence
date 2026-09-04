@@ -17,11 +17,11 @@ import (
 	"os"
 	"time"
 
-	"flight-search-intelligence/internal/envs"
+	"flight-search-intelligence/internal/catalog"
+	"flight-search-intelligence/internal/common"
 	"flight-search-intelligence/internal/googleflights"
 	"flight-search-intelligence/internal/openflights"
 	"flight-search-intelligence/internal/routesearch"
-	"flight-search-intelligence/internal/store"
 )
 
 func main() {
@@ -32,7 +32,7 @@ func main() {
 }
 
 func run() error {
-	_ = envs.Load(".env")
+	_ = common.Load(".env")
 
 	origin := flag.String("origin", "", "origin IATA airport code, e.g. SFO (required)")
 	destination := flag.String("destination", "", "destination IATA airport code, e.g. JFK (required)")
@@ -65,7 +65,7 @@ func run() error {
 		return fmt.Errorf("loading openflights graph: %w", err)
 	}
 
-	db, err := store.Open(*dbPath)
+	db, err := catalog.Open(*dbPath)
 	if err != nil {
 		return fmt.Errorf("opening store: %w", err)
 	}
@@ -74,7 +74,7 @@ func run() error {
 	deps := routesearch.Deps{
 		Flights: googleflights.NewClient(),
 		Graph:   graph,
-		Store:   db,
+		Catalog: db,
 		Logger:  logger,
 	}
 

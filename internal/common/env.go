@@ -1,7 +1,9 @@
-// Package envs loads KEY=VALUE lines from a .env-style file into the
-// process environment. Minimal stdlib substitute for a .env-loading
+// Package common holds small utilities with no better home of their own.
+//
+// Load reads KEY=VALUE lines from a .env-style file into the process
+// environment — a minimal stdlib substitute for a .env-loading
 // dependency; existing environment variables always win.
-package envs
+package common
 
 import (
 	"bufio"
