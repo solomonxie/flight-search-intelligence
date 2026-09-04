@@ -37,11 +37,13 @@ context while it's still searching.
 
 ## Try it now
 
-No account, no API key, nothing to configure beyond having Go installed.
-First time only, set up the local database:
+No account, no API key, nothing to configure beyond having Go and
+`sqlite3` installed. First time only, set up the local database (schema
+is applied with SQLite's own tooling, not Go — see `DESIGN.md` "Schema
+ownership"):
 
 ```sh
-go run ./cmd/dbinit
+make db-init
 ```
 
 Then:
