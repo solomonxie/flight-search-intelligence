@@ -19,7 +19,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-var requiredTables = []string{"flight_prices", "route_search_plans"}
+var requiredTables = []string{"flight_prices", "route_search_plans", "agent_requests", "agent_tasks"}
 
 // FlightPrice is one row of etl/dbt's `raw.flight_prices` source shape
 // (see etl/dbt/models/staging/stg_flights.sql) — one price observation.
