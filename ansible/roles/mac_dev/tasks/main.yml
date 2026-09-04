@@ -1,0 +1,6 @@
+---
+- name: Install required Homebrew packages
+  community.general.homebrew:
+    name: "{{ mac_dev_brew_packages }}"
+    state: present
+    update_homebrew: false
