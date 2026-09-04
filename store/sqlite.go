@@ -41,6 +41,14 @@ CREATE TABLE IF NOT EXISTS flight_prices (
 	currency     TEXT NOT NULL,
 	source       TEXT NOT NULL,
 	scraped_at   TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS route_search_plans (
+	id          TEXT PRIMARY KEY,
+	created_at  TEXT NOT NULL,
+	updated_at  TEXT NOT NULL,
+	status      TEXT NOT NULL,
+	plan_json   TEXT NOT NULL
 )`
 
 // SQLite is a thin wrapper around the flight_prices table.
@@ -102,4 +110,42 @@ func (s *SQLite) InsertFlightPrices(ctx context.Context, rows []FlightPrice) err
 	}
 
 	return tx.Commit()
+}
+
+// CachedPriceCents returns the cheapest previously-seen price for this
+// exact (origin, destination, depart_date), if the store has one — used
+// as the price-aware lower-bound estimate in routesearch instead of the
+// cruder distance × $/mile prior. ok is false if nothing's cached yet.
+func (s *SQLite) CachedPriceCents(ctx context.Context, origin, destination, departDate string) (cents int64, ok bool, err error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT MIN(price_cents) FROM flight_prices
+		WHERE origin = ? AND destination = ? AND depart_date = ?`,
+		origin, destination, departDate)
+
+	var n sql.NullInt64
+	if err := row.Scan(&n); err != nil {
+		return 0, false, fmt.Errorf("store: reading cached price: %w", err)
+	}
+	if !n.Valid {
+		return 0, false, nil
+	}
+	return n.Int64, true, nil
+}
+
+// SaveRouteSearchPlan upserts one route-search audit-trail row (see
+// DESIGN.md "Audit trail") — called once when a search starts (status
+// "running", so a crash mid-search still leaves a trace) and again when
+// it finishes.
+func (s *SQLite) SaveRouteSearchPlan(ctx context.Context, id, status string, planJSON []byte) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO route_search_plans (id, created_at, updated_at, status, plan_json)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at,
+			status = excluded.status, plan_json = excluded.plan_json`,
+		id, now, now, status, string(planJSON))
+	if err != nil {
+		return fmt.Errorf("store: saving route search plan: %w", err)
+	}
+	return nil
 }

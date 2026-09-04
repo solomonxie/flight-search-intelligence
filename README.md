@@ -42,7 +42,11 @@ See `DESIGN.md` for the full data-flow diagram and open decisions.
 | Path | What |
 |---|---|
 | `cmd/collector` | on-demand, per-route fare collection |
+| `cmd/routesearch` | cheap multi-leg/split-ticket route search (see DESIGN.md) |
 | `cmd/search-api` | flight search service (also triggers collection on a miss) |
+| `googleflights` | the scraper both commands above fetch through |
+| `openflights` | static airport/route-existence reference data (hub candidate generation) |
+| `store` | local SQLite serving store + route-search audit trail |
 | `etl/spark` | periodic cleaning job → Delta Lake |
 | `etl/dbt` | Delta Lake silver → gold analytics models |
 | `etl/airflow/dags` | periodic ETL + serving-sync orchestration |
@@ -90,3 +94,22 @@ for now, the same way it already skips Kafka/Temporal/S3. See `DESIGN.md`
 and `googleflights/` for how the scrape itself works (a reverse-engineered
 protobuf query param + plain HTTP, no headless browser — undocumented and
 can break if Google changes the format).
+
+`cmd/routesearch` runs the cheap multi-leg/split-ticket search directly
+the same way:
+
+```sh
+go run ./cmd/routesearch -origin SFO -destination JFK -date 2026-12-05
+```
+
+First run downloads and caches the OpenFlights airports/routes dataset
+into `data/openflights/` (~3.5MB, one-time). It scrapes the direct route
+as a baseline, geometry- and price-prunes hub candidates from that
+dataset, and spends up to `-budget` scrapes (default 20) trying to beat
+the baseline via a split-ticket hub connection — see DESIGN.md "Cheap
+multi-leg route search" for the full algorithm. `-delay` (default 3s)
+paces scrapes; production is a Temporal durable timer instead (minutes to
+hours — see "Pacing, audit trail, and observability"), not needed for a
+short interactive run. Every candidate considered, kept, or pruned (and
+why) is saved as one JSON row in `route_search_plans` in the same SQLite
+file — the audit trail for debugging "why didn't it find X".
