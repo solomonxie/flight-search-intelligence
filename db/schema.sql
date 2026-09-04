@@ -1,11 +1,14 @@
 -- Raw/serving-layer tables for the local SQLite catalog (see
 -- internal/catalog and DESIGN.md "Local development"). This is the
--- one source of truth for these tables' shape -- not Go code, not
--- etl/dbt's staging model (which only describes the shape it expects
--- to read, per etl/dbt/models/staging/sources.yml).
+-- one source of truth for these tables' shape -- not Go code (which
+-- only ever inserts/selects, never creates or alters schema -- see
+-- DESIGN.md "Schema ownership"), and not etl/dbt's staging model
+-- (which only describes the shape it expects to read, per
+-- etl/dbt/models/staging/sources.yml).
 --
--- Apply before running cmd/collector or cmd/routesearch:
---   go run ./cmd/dbinit -db data/flight_search.db
+-- Apply with the database's own tooling before running cmd/collector
+-- or cmd/routesearch -- `make db-init`, or directly:
+--   sqlite3 data/flight_search.db < db/schema.sql
 
 -- One row per scraped price observation. Shape matches
 -- etl/dbt/models/staging/stg_flights.sql's `raw.flight_prices` source.
