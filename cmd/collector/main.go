@@ -17,8 +17,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/solomonxie/flight-search-intelligence/internal/amadeus"
-	"github.com/solomonxie/flight-search-intelligence/internal/envfile"
+	"github.com/solomonxie/flight-search-intelligence/amadeus"
+	"github.com/solomonxie/flight-search-intelligence/envfile"
 )
 
 func main() {
