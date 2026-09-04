@@ -99,8 +99,10 @@ func printSummary(plan *routesearch.Plan) {
 	fmt.Printf("\nRequest %s: %d queries used, %d/%d candidate hubs survived the geometry prune.\n",
 		plan.RequestID, plan.QueriesUsed, plan.CandidatesAfterGeometryPrune, plan.CandidatesConsidered)
 
+	printCandidates(plan)
+
 	if len(plan.FinalResult) == 0 {
-		fmt.Println("No feasible itineraries found.")
+		fmt.Println("\nNo feasible itineraries found.")
 		return
 	}
 	fmt.Printf("\n%d result(s) (Pareto set — price vs. duration):\n", len(plan.FinalResult))
@@ -113,6 +115,29 @@ func printSummary(plan *routesearch.Plan) {
 			i+1, r.PriceUSD, r.DurationMinutes/60, r.DurationMinutes%60, joinPath(r.Path), kind)
 	}
 	fmt.Printf("\nFull audit trail saved to the store (route_search_plans, id=%s).\n", plan.RequestID)
+}
+
+// printCandidates prints the full audit-trail table — rank 0 is always
+// the direct baseline every hub candidate is measured against, in the
+// same table as the hub candidates rather than off to the side.
+func printCandidates(plan *routesearch.Plan) {
+	fmt.Printf("\n%-5s %-6s %-9s %-18s %-8s %-8s %-11s %s\n",
+		"Rank", "Hub", "LB $", "Outcome", "Leg1 $", "Leg2 $", "Combined $", "Reason")
+	for _, c := range plan.CandidatesRanked {
+		leg1, leg2 := "", ""
+		if c.Leg1 != nil && c.Leg1.PriceUSD > 0 {
+			leg1 = fmt.Sprintf("%.0f", c.Leg1.PriceUSD)
+		}
+		if c.Leg2 != nil && c.Leg2.PriceUSD > 0 {
+			leg2 = fmt.Sprintf("%.0f", c.Leg2.PriceUSD)
+		}
+		combined := ""
+		if c.CombinedUSD > 0 {
+			combined = fmt.Sprintf("%.0f", c.CombinedUSD)
+		}
+		fmt.Printf("%-5d %-6s %-9.1f %-18s %-8s %-8s %-11s %s\n",
+			c.Rank, c.Hub, c.LBUSD, c.Outcome, leg1, leg2, combined, c.Reason)
+	}
 }
 
 func joinPath(path []string) string {
