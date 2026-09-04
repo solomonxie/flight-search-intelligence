@@ -187,14 +187,35 @@ do. Each request's agent loop is itself one long-running Temporal
 workflow (call it `TravelRequestAgentWorkflow`), keyed so email intake
 can find it again — a reply to an existing thread doesn't start a new
 request, it delivers a **Signal** into the workflow already running for
-that thread. On receiving one, the workflow updates its spec (step 1)
-and re-runs step 2 with the new information, whether it was sitting
-mid-dispatch, mid-defer-timer, or already finalized-but-still-watching-
-the-thread-briefly. A signal arriving while a tool call is already
-in flight doesn't need to hard-cancel it (Temporal supports that if it
-ever matters) — the simpler default is: let the in-flight call finish,
-then let the next decision (step 2) account for the new context before
-deciding whether that result still matters.
+that thread.
+
+**None of this needs the agent to sit there occupying anything while it
+waits, distributed or not.** A Temporal workflow "awaiting" a child
+workflow, an Activity (an LLM call included — has to be an Activity, not
+inline workflow code, since an LLM call is non-deterministic and
+workflow code must be deterministic except via Activities/child
+workflows), or a signal is durably checkpointed and costs nothing while
+it waits — a worker can hold thousands of such waits, for seconds or for
+months, without a blocked thread or a busy-poll anywhere. This is true
+of every wait in this design already (the dispatched search task, the
+booking-horizon timer, waiting on a signal) — it doesn't need separate
+handling to be "async."
+
+**Reacting the instant a signal arrives, not just between rounds**, is
+the one place the design above was too weak: "wait for the current tool
+call to finish, then look at the new context" only checks signals
+between loop iterations. The Go SDK's `workflow.Selector` is the actual
+mechanism for better than that: it waits on *multiple* futures at once —
+the in-flight tool call's completion **and** the signal channel — and
+resumes on whichever fires first. So the default is a workflow that's
+simultaneously awaiting its dispatched task and listening for a signal,
+and reacts to new context immediately rather than only after the current
+task happens to finish. A signal arriving mid-dispatch still doesn't need
+to hard-cancel the in-flight call (Temporal supports that too, via the
+child workflow's cancellation handle, if a case ever needs it) — the
+agent can let it keep running and simply decide, right away, whether
+it's still worth waiting for once it sees the new context, rather than
+finding out only when it completes.
 
 **Termination is still bounded, same principle as the query budget, one
 level up.** An agent that can always decide "let's try one more idea"
