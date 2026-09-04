@@ -14,10 +14,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"flight-search-intelligence/envs"
 	"flight-search-intelligence/googleflights"
+	"flight-search-intelligence/store"
 )
 
 func main() {
@@ -36,6 +38,7 @@ func run() error {
 	returnDate := flag.String("return-date", "", "return date, YYYY-MM-DD (optional, round-trip)")
 	adults := flag.Int("adults", 1, "number of adult passengers")
 	outDir := flag.String("out-dir", "data/raw", "directory to write the raw HTML result into")
+	dbPath := flag.String("db", "data/flight_search.db", "SQLite serving-store path to write parsed offers into")
 	flag.Parse()
 
 	if *origin == "" || *destination == "" || *date == "" {
@@ -72,7 +75,41 @@ func run() error {
 	fmt.Printf("Wrote raw result to %s\n\n", path)
 
 	printSummary(offers)
+
+	if err := saveOffers(*dbPath, *origin, *destination, *date, *returnDate, offers); err != nil {
+		return fmt.Errorf("saving parsed offers: %w", err)
+	}
+	fmt.Printf("Saved %d offer(s) to %s\n", len(offers), *dbPath)
 	return nil
+}
+
+// saveOffers persists parsed offers as etl/dbt's raw.flight_prices shape
+// (see store.FlightPrice) into the local SQLite serving-store stand-in —
+// skipping the Spark/Delta Lake/dbt gold pipeline DESIGN.md targets, for
+// now, the same way this collector already skips Kafka/Temporal/S3.
+func saveOffers(dbPath, origin, destination, departDate, returnDate string, offers []googleflights.Offer) error {
+	db, err := store.Open(dbPath)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	scrapedAt := time.Now()
+	rows := make([]store.FlightPrice, len(offers))
+	for i, o := range offers {
+		rows[i] = store.FlightPrice{
+			Origin:      origin,
+			Destination: destination,
+			Airline:     strings.Join(o.Airlines, ","),
+			DepartDate:  departDate,
+			ReturnDate:  returnDate,
+			PriceCents:  int64(o.Price) * 100,
+			Currency:    "USD",
+			Source:      "google_flights",
+			ScrapedAt:   scrapedAt,
+		}
+	}
+	return db.InsertFlightPrices(context.Background(), rows)
 }
 
 // writeRaw drops the untouched HTML response into outDir, named so repeat
