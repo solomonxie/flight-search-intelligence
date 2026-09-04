@@ -3,9 +3,12 @@
 // Collector writes here directly for now, skipping the Spark/Delta Lake/
 // dbt gold pipeline that will eventually sit in between.
 //
-// Schema is not defined here: it lives in etl/sql/schema.sql, applied by
-// `go run ./cmd/dbinit` before this package's Open is ever called — Open
-// fails fast, not silently, if that hasn't happened yet.
+// This package never creates or alters schema — see DESIGN.md "Schema
+// ownership": that's DBA/ops tooling's job, not Go's, even here. Schema
+// lives in db/schema.sql, applied with the database's own tooling
+// (`make db-init`, or `sqlite3 ... < db/schema.sql` directly) before
+// this package's Open is ever called — Open fails fast, not silently,
+// if that hasn't happened yet.
 package catalog
 
 import (
@@ -38,7 +41,7 @@ type SQLite struct {
 	db *sql.DB
 }
 
-// Open opens the SQLite database at path and checks that etl/sql/schema.sql
+// Open opens the SQLite database at path and checks that db/schema.sql
 // has already been applied — it does not create tables itself.
 func Open(path string) (*SQLite, error) {
 	db, err := sql.Open("sqlite", path)
@@ -60,7 +63,7 @@ func checkSchema(db *sql.DB) error {
 		var exists int
 		if err := row.Scan(&exists); err != nil {
 			return fmt.Errorf(
-				"catalog: table %q not found — run `go run ./cmd/dbinit` first to apply etl/sql/schema.sql (%w)",
+				"catalog: table %q not found — run `make db-init` first to apply db/schema.sql (%w)",
 				table, err)
 		}
 	}

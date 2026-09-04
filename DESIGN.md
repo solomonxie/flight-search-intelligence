@@ -337,6 +337,64 @@ only way to catch it inferring something the email never actually said.
   else is self-managed. Nothing under `infra/` exists yet — this is
   target state, not current.
 
+## Schema ownership
+
+**Resolved, applies to every database this project ever has (SQLite
+today, Postgres in prod later): Go code never creates or alters
+schema.** It inserts, updates, and selects — nothing that touches DDL.
+Schema is DBA/ops tooling's job, kept structurally separate from
+application code, the same way Terraform provisions the database
+*server* but never reaches into table-level DDL — a different layer,
+different tooling, different (and often more cautious) change process.
+
+**Why this is the standard, not just a preference here**: an app
+process that can alter its own schema has no boundary between "my code
+changed" and "my data's shape changed" — two risk profiles that
+production practice keeps apart on purpose (schema changes are less
+reversible, more often reviewed separately, sometimes run under a
+different, more-privileged DB credential than the app's own runtime
+user gets). Conflating them into one Go binary's startup path is
+exactly the anti-pattern this avoids.
+
+**Today (SQLite, local dev)**: `db/schema.sql` is the one source of
+truth for `flight_prices`/`route_search_plans`'s shape — plain DDL, no
+Go involved in applying it. `make db-init` (or directly, `sqlite3
+data/flight_search.db < db/schema.sql`) applies it using SQLite's own
+CLI. `internal/catalog.Open` checks both tables exist and fails fast
+with a pointer back to `make db-init` if not — a read (`SELECT ... FROM
+sqlite_master`), not schema management, so it doesn't cross the line
+above; it just refuses to silently proceed against a database that was
+never set up.
+
+**Target (Postgres in prod, on the Helm/Kubernetes stack already
+decided)**: the same principle, realized as a **Helm pre-install/
+pre-upgrade hook Job** — a one-shot Kubernetes Job, gated to complete
+before the application Deployment rolls out, running a dedicated
+migration tool (e.g. `golang-migrate/migrate`, Flyway, Atlas — not
+decided yet, see below) against versioned migration files. Schema
+application becomes an infra artifact (a Job spec + migration files),
+never application runtime code, in prod exactly as in local dev.
+
+**Today's `db/schema.sql` is one flat file, not versioned migrations —
+deliberately, for now.** The schema has never evolved yet (only ever
+been created once); versioned up/down migration files earn their keep
+once there's an actual second change to sequence after the first.
+Revisit when that happens, or before adopting Postgres in prod,
+whichever comes first.
+
+**Open decisions**:
+- **Migration tool**: not asked — genuinely undecided (unlike most
+  "not asked" items elsewhere in this doc, this one has no default
+  applied yet). `golang-migrate/migrate` is the most common choice in a
+  Go-shaped stack; Atlas is the more modern declarative alternative.
+  Pick when a Postgres migration actually needs to be sequenced, not
+  before.
+- **Least-privilege DB credentials**: not asked — a hardened setup
+  gives the app's own runtime Postgres user no DDL rights at all,
+  separate from the migration tool's credential. Doesn't apply to
+  SQLite (no user/permission model) — a Postgres-in-prod item, flagged
+  for when that exists.
+
 ## Collector task queue: Kafka → Temporal
 
 How a task actually moves from "an email/search-api miss arrived" to
