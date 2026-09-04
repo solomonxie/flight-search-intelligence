@@ -1,3 +1,3 @@
-module github.com/solomonxie/flight-search-intelligence
+module flight-search-intelligence
 
 go 1.26
