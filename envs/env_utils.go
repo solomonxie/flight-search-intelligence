@@ -1,7 +1,7 @@
-// Package envfile loads KEY=VALUE lines from a .env-style file into the
+// Package envs loads KEY=VALUE lines from a .env-style file into the
 // process environment. Minimal stdlib substitute for a .env-loading
 // dependency; existing environment variables always win.
-package envfile
+package envs
 
 import (
 	"bufio"
