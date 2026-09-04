@@ -1,70 +1,60 @@
-# Command-Line Entry Points
+# The Programs You Actually Run
 
-Every binary this project ships. Each section below is one subfolder.
+Everything under `cmd/` is a separate program you can start from a
+terminal. Each section below is one of them.
 
 ## `collector/`
 
-Fetches real flight fares by scraping Google Flights, in two modes: a
-direct-run CLI for one-off/manual use, and a poll worker that runs
-searches the agent loop (`internal/agents`, `cmd/email-intake`)
-dispatches. See DESIGN.md "Collector task dispatch" for why this is a
-plain poll loop against the serving store rather than a Kafka consumer
-or a Temporal worker.
+The worker that actually goes and fetches flight prices. Runs two ways:
 
-- **`main.go`** — flag parsing and mode dispatch. Default mode is the
-  direct-run CLI: builds one `googleflights.SearchParams` call from
-  `-origin`/`-destination`/`-date`/etc., writes the raw HTML response
-  (`writeRaw`, standing in for the S3 raw zone), and saves parsed offers
-  into the serving store (`saveOffers`). `-worker` switches to the
-  poll-worker mode instead.
-- **`worker.go`** — `runWorker`, the poll loop: sweep stale task claims,
-  try to claim one pending `agent_tasks` row, and if it gets one, hand it
-  to `runTask` in its own goroutine (capped by `-concurrency`) without
-  blocking the next claim attempt.
-- **`activities.go`** — `fetchFare`, the one real unit of work: wraps
-  `internal/routesearch.Search` (one-way only, for now) and trims the
-  resulting `Plan` down to the thin `agents.CollectRouteResult` shape a
-  task's `result_json` holds.
+- By default: run it once by hand for a specific route/date, useful for
+  testing. It prints what it found and saves it.
+- With `-worker`: instead runs forever in the background, watching for
+  search jobs that other parts of the system create, and works through
+  them — a few at a time, not all at once, so it doesn't hammer Google.
+
+Files:
+- **`main.go`** — reads the command-line options and picks which of the
+  two modes above to run.
+- **`worker.go`** — the background-worker loop: keeps checking for a new
+  job, grabs one, and works on it without sitting idle waiting for it to
+  finish — it can be checking for the *next* job at the same time. If a
+  worker crashes partway through a job, another worker (or the same one,
+  after restarting) will notice later and pick it back up.
+- **`activities.go`** — the actual "go check flight prices" step one job
+  runs: calls the search logic and saves a short summary of the result.
 
 ## `email-intake/`
 
-The reconciler for `internal/agents`' agent loop, plus a dev-only CLI
-standing in for SES inbound until that's actually built. In prod, this
-is what SES inbound hands a request email to; today it's three CLI modes
-in one `main.go`, all against the local SQLite serving store.
+Stands in for reading a traveler's actual email until real email support
+is built. Also runs the background loop that pushes each traveler's
+request forward, step by step — asking the "brain"
+(`internal/agents`) what to do next, starting new searches, and sending
+the final answer once it's ready.
 
-- **`main.go`** — three modes: `-worker` (`runWorker`, the actual
-  reconciler — lists every non-finalized `agent_requests` row and calls
-  `agents.AdvanceRequest` on each); `-start` (`startRequest`, creates a
-  new request from flags, standing in for "an initial request email
-  arrived" — `-wait` is a dev-only blocking poll for the result, real SES
-  intake wouldn't block); `-signal` (`sendFollowUp`, appends a
-  plain-language constraint to an existing request, standing in for "a
-  reply arrived on an existing thread").
+- **`main.go`** — three modes: `-worker` (keep checking every open
+  request and nudge it forward, one step at a time), `-start` (pretend a
+  new request email just arrived — creates one from command-line
+  options you type in), `-signal` (pretend a follow-up email arrived —
+  adds a new note or requirement to a request that's already in
+  progress).
 
 ## `routesearch/`
 
-Runs `internal/routesearch`'s full algorithm directly to completion: one
-request, no email, no agent loop, no Kafka/Temporal. Today's actual entry
-point for trying the search engine against real, live fare data (see the
-root `README.md`'s "Try it now").
+Run the full money-saving flight search once, right now, from your
+terminal — ask a question, get an answer, done. No database polling, no
+background worker involved. This is the easiest way to try the search
+yourself today (see the root `README.md`'s "Try it now").
 
-- **`main.go`** — flag parsing, dependency wiring, and mode dispatch by
-  which flags are set (plain origin/destination/date →
-  `routesearch.Search`; `+ -return-date` → `SearchRoundTrip`; `+
-  -date-window-days` → `SearchFlexible`). The rest of the file
-  (`printSummary`/`printRoundTrip`/`printFlexible`) renders each `Plan`
-  type's results to stdout — a human-readable view of the same audit
-  trail `routesearch` writes to `route_search_plans`, not a separate
-  computation.
+- **`main.go`** — reads your command-line options, runs the right kind
+  of search (plain one-way, round trip, or flexible dates), and prints a
+  readable summary of what it found.
 
 ## `search-api/`
 
-The read path DESIGN.md describes: flexible, low-latency search against
-the serving store, synced from the Delta Lake gold layer once `etl/` is
-real. On a miss, meant to also create an `agent_requests` row directly
-and return "pending, check back" instead of an empty result.
+Meant to be a fast lookup service: "has anyone already searched this
+route recently? Tell me the answer right away, without scraping
+anything new." **Not built yet** — running it today just prints a
+placeholder message.
 
-- **`main.go`** — **scaffold only**, currently just prints a placeholder
-  message. Not yet wired to `internal/catalog`, and not yet creating
-  `agent_requests` rows on a miss.
+- **`main.go`** — scaffold only.

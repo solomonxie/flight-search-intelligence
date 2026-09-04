@@ -1,74 +1,42 @@
-# Database Schema Management
+# How the Database Is Set Up
 
-**Resolved rule, applies to every database this project ever has: Go code
-never creates or alters schema.** No `CREATE TABLE`, no `ALTER TABLE`,
-nowhere in any `cmd/`/`internal/` package — those packages only insert,
-update, and select. Schema is DBA/ops tooling's job, kept structurally
-separate from application code: the same way Terraform provisions a
-database *server* but never reaches into table-level DDL, a different
-layer, different tooling, a more cautious change process. See DESIGN.md
-"Schema ownership" for the full reasoning (in short: an app process that
-can alter its own schema has no boundary between "my code changed" and
-"my data's shape changed," two risk profiles production practice keeps
-apart on purpose).
+This project needs a database to store things like flight prices found
+and the progress of each search. This page is about how the *shape* of
+that database gets created — which tables exist, what columns they
+have — not about the data inside it.
 
-## How it's managed
+**The one rule that matters: the application itself is never allowed to
+create or change tables.** Table changes are made by a separate tool, run
+on purpose by a person (or a deployment step) — never automatically,
+just because the app happened to start up. This keeps "the app changed my
+table by accident" from ever being possible.
 
-**Flyway**, versioned migrations, one folder per database:
+## How it actually works
 
-```
-databases/
-  sqlite/
-    flyway.toml          # [environments.default].url + [flyway].locations
-    migrations/
-      V001__create_flight_prices.sql
-      V002__create_route_search_plans.sql
-      V003__create_agent_requests.sql
-      V004__create_agent_tasks.sql
-  postgres/               # placeholder — same pattern, once prod needs it
-  clickhouse/             # placeholder — not yet part of the documented
-                           # design (not mentioned in DESIGN.md); flagging
-                           # rather than inventing a purpose for it
-```
+Every table change is written as its own small, numbered file, e.g.
+`V001__create_flight_prices.sql`. A tool called
+[Flyway](https://flywaydb.org) reads these files in order and applies
+each one exactly once, keeping track of which ones it's already run so
+it never re-applies the same change twice.
 
-Each migration is hand-written, explicit SQL — not a diff-based/
-declarative tool (Liquibase-style auto-generated diffs, or Atlas). Less
-surface for a tool's own dialect-translation logic to get a migration
-subtly wrong across versions. Naming (`V<version>__<description>.sql`,
-double underscore) is Flyway's own required format, not a style choice —
-a single underscore fails to parse. `flyway_schema_history`, a table
-Flyway creates in the target database itself, tracks exactly which
-migrations have run.
-
-## How it works today (SQLite, local dev)
+To set up your local database, run:
 
 ```sh
 make db-init
-# -> flyway -configFiles=databases/sqlite/flyway.toml migrate
 ```
 
-This creates `flyway_schema_history` and applies every migration in
-`sqlite/migrations/` in order. `internal/catalog.Open` then checks (a
-read, not schema management) that every table it expects actually
-exists, and fails fast with a pointer back to `make db-init` if this step
-was skipped — rather than letting the first real query fail with a
-confusing "no such table."
+That's it — this creates the database file (if it doesn't already exist)
+and brings it up to date.
 
-## Target (Postgres in prod)
+## What's in this folder
 
-Same principle, realized as a Helm pre-install/pre-upgrade hook Job — a
-one-shot Kubernetes Job, gated to complete before the application
-Deployment rolls out, running the official `flyway/flyway` image against
-`databases/postgres/migrations/`. Schema application stays an infra
-artifact (a Job spec + migration files), never application runtime code,
-in prod exactly as in local dev. Not built yet — `databases/postgres/` is
-still an empty placeholder.
-
-## Provisioning Flyway itself
-
-A dev-machine/CI setup step, not something this repo's own tooling
-installs — consistent with the rule above: the migration tool is
-infra/ops-provisioned, not something Go (or any app-side script) pulls in
-for itself. Locally: `ansible-playbook ansible/playbooks/mac_dev.yml`, or
-`brew install flyway` by hand. In CI/prod: the `flyway/flyway` Docker
-image.
+- **`sqlite/`** — what's actually used today, for local testing.
+  Contains the numbered change files (`migrations/`) and a small config
+  file telling Flyway where the database lives.
+- **`postgres/`** — an empty placeholder for the real database the
+  live/production version of this project will eventually use. Nothing
+  here yet.
+- **`clickhouse/`** — just an empty leftover folder sitting on disk. It's
+  not part of the plan anywhere else in this project, and it isn't even
+  saved in the project's history — noting it here so it isn't a mystery,
+  not because it means anything yet.
