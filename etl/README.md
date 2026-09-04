@@ -1,51 +1,35 @@
-# ETL Pipeline
+# The Nightly Cleanup & Reporting Job (Not Built Yet)
 
-The periodic batch chain DESIGN.md's data-flow diagram puts *after*
-collection: raw scraped fares land in the S3/MinIO raw zone (written by
-`cmd/collector`, see its README), then get cleaned into Delta Lake
-(Spark), modeled into a gold analytics layer (dbt), and synced into the
-serving store `cmd/search-api` reads — orchestrated on a schedule by
-Airflow. This is event-driven *up to* collection (an email or a
-`search-api` miss triggers a scrape — see DESIGN.md "Collection scope")
-and schedule-driven *after* it — nothing in this folder decides what to
-scrape, only what to do with what's already been scraped.
+This folder is about what happens to flight-price data *after* it's
+already been collected: cleaning it up and turning it into useful
+trends/reports, on a schedule (like once a day) — separate from "someone
+just asked about a flight, go check it right now," which is handled
+elsewhere (see `cmd/README.md`).
 
-**Status: every file below is a scaffold** — real task bodies, real
-Spark logic, and real dbt tests are all still `TODO`. What exists is the
-shape of the pipeline, wired together, not the pipeline itself.
+**Nothing in this folder actually works yet.** It's a sketch of the
+shape the pipeline will take, with placeholder steps that don't do
+anything real yet — think of it as labeled empty boxes, not a working
+machine.
 
 ## `airflow/dags/flight_pipeline_dag.py`
 
-The orchestration: one DAG (`flight_pipeline`, daily schedule) chaining
-three tasks — `run_collector` → `spark_clean` → `dbt_build`. Each is
-currently a `BashOperator` stub that just echoes what it's meant to run
-(`spark-submit etl/spark/clean_raw_flights.py`, `dbt build --project-dir
-etl/dbt`) — not real triggers yet. Per DESIGN.md "Components," this is
-the periodic half of the pipeline only; the collector itself is
-triggered by email/search-api demand, not by this schedule.
+The daily schedule: "run the collector, then clean the data, then build
+the reports" — in that order, once a day. Right now each of those three
+steps is just a placeholder that prints a message instead of actually
+doing anything.
 
 ## `spark/clean_raw_flights.py`
 
-The batch job that dedupes/cleans whatever raw drops have accumulated
-since the last run and merges them into Delta Lake (not plain Parquet —
-each run needs to upsert into shared tables without clobbering prior
-requested-route history, per DESIGN.md). Currently just opens and closes
-a `SparkSession`; the actual cleaning (dedupe by `(origin, destination,
-airline, depart_date, source)`, drop rows with a missing price,
-normalize currency) is a `TODO` in the file's own docstring.
+Meant to remove duplicate or bad price entries before they're used for
+reporting (e.g. the same flight price accidentally saved twice). Right
+now it just starts up and immediately shuts back down — no real cleanup
+logic yet.
 
 ## `dbt/`
 
-Models the Delta silver layer into a gold, analytics-ready layer (fare
-trends per requested route) via Spark SQL.
+Turns cleaned data into named, reusable tables/reports.
 
-- **`dbt_project.yml`** — project config: profile name
-  `flight_search_intelligence`, staging models materialized as views.
-- **`models/staging/sources.yml`** — declares the `raw.flight_prices`
-  source dbt reads from. Table shape lives in
-  `databases/sqlite/migrations/` (see `databases/README.md`), not here —
-  this file only names what dbt points at.
-- **`models/staging/stg_flights.sql`** — the one staging model so far: a
-  passthrough select over `raw.flight_prices`' columns. `TODO`, per its
-  own comment: dedup logic and tests, once the real source table's shape
-  (post-Spark-cleaning) is settled.
+- **`dbt_project.yml`** — basic project settings.
+- **`models/staging/sources.yml`** — says where the raw data comes from.
+- **`models/staging/stg_flights.sql`** — a first, very basic step that
+  just copies the data over as-is — no real cleanup logic added yet.
