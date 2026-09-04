@@ -112,14 +112,17 @@ func (s *SQLite) InsertFlightPrices(ctx context.Context, rows []FlightPrice) err
 	return tx.Commit()
 }
 
-// CachedPriceCents returns the cheapest previously-seen price for this
-// exact (origin, destination, depart_date), if the store has one — used
-// as the price-aware lower-bound estimate in routesearch instead of the
-// cruder distance × $/mile prior. ok is false if nothing's cached yet.
+// CachedPriceCents returns the cheapest previously-seen *one-way* price
+// for this exact (origin, destination, depart_date), if the store has
+// one — used as the price-aware lower-bound estimate in routesearch
+// instead of the cruder distance × $/mile prior. ok is false if nothing's
+// cached yet. Explicitly excludes round-trip rows (non-empty return_date):
+// a round trip's price_cents is the bundled *total*, not a one-way price,
+// and mixing the two would make this lower bound wildly wrong.
 func (s *SQLite) CachedPriceCents(ctx context.Context, origin, destination, departDate string) (cents int64, ok bool, err error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT MIN(price_cents) FROM flight_prices
-		WHERE origin = ? AND destination = ? AND depart_date = ?`,
+		WHERE origin = ? AND destination = ? AND depart_date = ? AND return_date = ''`,
 		origin, destination, departDate)
 
 	var n sql.NullInt64
