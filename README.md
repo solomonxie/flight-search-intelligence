@@ -53,8 +53,8 @@ Early scaffold — see `DESIGN.md` for the target architecture
 (email/search-triggered on-demand collection via Kafka/Temporal, Delta
 Lake, serving sync) this doesn't yet implement. The collector
 (`cmd/collector`) is the one piece with real logic: run directly, it
-fetches real fare offers from the Amadeus test API for one route/date
-and writes the raw JSON locally (see "Local dev" below) — no Kafka, no
+scrapes real fare offers from Google Flights for one route/date and
+writes the raw HTML locally (see "Local dev" below) — no Kafka, no
 Temporal, no S3 yet, just the provider fetch proven out end to end.
 Everything else is still scaffold: `search-api` is unimplemented, the
 Spark job writes plain files (no Delta Lake), dbt/search-api still
@@ -74,16 +74,16 @@ collector runs against a mock fare provider instead of real ones. See
 `DESIGN.md`'s "Local development" section for the full plan; none of
 this tooling exists in the repo yet.
 
-Until then, the collector runs directly (no Docker, no cluster) against
-the real Amadeus Self-Service test API:
+Until then, the collector runs directly (no Docker, no cluster), scraping
+Google Flights — no API key needed:
 
 ```sh
-cp .env.example .env          # fill in AMADEUS_CLIENT_ID/SECRET
-                               # (free: https://developers.amadeus.com/my-apps)
 go run ./cmd/collector -origin SFO -destination JFK -date 2026-12-05
 ```
 
-This fetches real (test-environment) fare offers, prints a summary, and
-writes the raw JSON response to `data/raw/`. It bypasses Kafka/Temporal/S3
-for now — see `DESIGN.md` "Collector task queue" for the queue-driven
-version this will grow into.
+This fetches real fare offers, prints a summary, and writes the raw HTML
+response to `data/raw/`. It bypasses Kafka/Temporal/S3 for now — see
+`DESIGN.md` "Collector task queue" for the queue-driven version this will
+grow into, and `googleflights/` for how the scrape itself works (a
+reverse-engineered protobuf query param + plain HTTP, no headless
+browser — undocumented and can break if Google changes the format).
