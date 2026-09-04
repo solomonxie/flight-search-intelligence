@@ -17,9 +17,9 @@ import (
 	"strings"
 	"time"
 
-	"flight-search-intelligence/envs"
-	"flight-search-intelligence/googleflights"
-	"flight-search-intelligence/store"
+	"flight-search-intelligence/internal/envs"
+	"flight-search-intelligence/internal/googleflights"
+	"flight-search-intelligence/internal/store"
 )
 
 func main() {
