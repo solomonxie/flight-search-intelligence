@@ -37,7 +37,14 @@ context while it's still searching.
 
 ## Try it now
 
-No account, no API key, nothing to configure beyond having Go installed:
+No account, no API key, nothing to configure beyond having Go installed.
+First time only, set up the local database:
+
+```sh
+go run ./cmd/dbinit
+```
+
+Then:
 
 ```sh
 go run ./cmd/routesearch -origin SFO -destination JFK -date 2026-12-05

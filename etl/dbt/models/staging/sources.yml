@@ -2,6 +2,9 @@ version: 2
 
 sources:
   - name: raw
-    description: Raw scraped data landed by cmd/collector and cleaned by etl/spark.
+    description: >
+      Raw scraped data landed by cmd/collector and cleaned by etl/spark.
+      Table shape is defined in etl/sql/schema.sql, not here — this only
+      names the tables dbt reads from.
     tables:
       - name: flight_prices
