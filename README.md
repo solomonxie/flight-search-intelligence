@@ -81,9 +81,12 @@ Google Flights — no API key needed:
 go run ./cmd/collector -origin SFO -destination JFK -date 2026-12-05
 ```
 
-This fetches real fare offers, prints a summary, and writes the raw HTML
-response to `data/raw/`. It bypasses Kafka/Temporal/S3 for now — see
-`DESIGN.md` "Collector task queue" for the queue-driven version this will
-grow into, and `googleflights/` for how the scrape itself works (a
-reverse-engineered protobuf query param + plain HTTP, no headless
-browser — undocumented and can break if Google changes the format).
+This fetches real fare offers, prints a summary, writes the raw HTML
+response to `data/raw/`, and parses the offers into `data/flight_search.db`
+(SQLite, table `flight_prices` — the shape `etl/dbt/models/staging/
+stg_flights.sql` expects) — skipping the Spark/Delta Lake/dbt gold pipeline
+for now, the same way it already skips Kafka/Temporal/S3. See `DESIGN.md`
+"Collector task queue" for the queue-driven version this will grow into,
+and `googleflights/` for how the scrape itself works (a reverse-engineered
+protobuf query param + plain HTTP, no headless browser — undocumented and
+can break if Google changes the format).
