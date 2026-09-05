@@ -104,16 +104,23 @@ scrape volume to actual requests (see "Collection scope" below).
 
 ## Agent loop: LLM drives the search, Go stays narrow
 
-**Status: a first draft of the loop mechanics is built (`internal/agents`,
-`internal/kafka`, `cmd/agent-worker`, `cmd/collector -worker`,
-`cmd/email-intake`) — ahead of the sequencing this section originally
-called for ("no LLM gets wired in until the deterministic Go side is
-solid"), at explicit request, as a prototype of the control flow. The
-decision step (`DecideNextAction`) is still a deterministic stub, not a
-real LLM call** — see `internal/agents/decide.go` — so what's actually
-proven out so far is the *loop*, not the judgment calls it exists to
-make. Treat everything below as the built shape, with the LLM call
-itself still an open decision (see "Open decisions").
+**Status: built and live-verified, including the decision core.** The
+loop mechanics (`internal/agents`, `internal/kafka`, `cmd/agent-worker`,
+`cmd/collector -worker`, `cmd/email-intake`) were built first, ahead of
+the sequencing this section originally called for ("no LLM gets wired in
+until the deterministic Go side is solid"), at explicit request, as a
+prototype of the control flow — `DecideNextAction` was a deterministic
+stub through that phase. `DecideNextAction` and spec formation
+(`agents.FormSpec`) are now real `agents.LLMClient` calls (see
+`internal/agents/decide.go`/`formspec.go`), verified live against a
+local Ollama backend across an underspecified request (asked a
+clarifying question), a complete request (dispatched and finalized on
+one round), and a soft-constraint violation (a self-transfer result
+correctly judged as not "good enough" and retried rather than
+finalized) — IMPLEMENTATION_PLAN.md Phase 2. Still open: `SearchFlexible`
+as a second dispatchable tool (`Spec`'s date-window field), and
+`ActionDefer`'s wake-sweep (the decision prompt tells the model never to
+choose `defer`, so this stays a dead path on purpose for now).
 
 **The reframing**: the backend is not "deterministic pipeline with an
 LLM bolted on at the email boundary" — it's an **agent loop**. An LLM
@@ -307,10 +314,12 @@ judgment calls are not, so the record of *why* the agent made one is the
 only way to catch it inferring something the email never actually said.
 
 **Where this lives in the repo — resolved, built**: `internal/agents`
-holds the loop's logic — `DecideNextAction` (the stub LLM-call
-stand-in), `DraftFinalEmail`, `Decide` (reads an `agent_requests` row and
-either dispatches a new task or finalizes), and `RecordTaskResult` (folds
-a finished task's outcome back into its request and hands it back to
+holds the loop's logic — `DecideNextAction` and `FormSpec` (the real
+`LLMClient` calls; `llm.go`/`ollama.go`/`openai.go` are the adapter and
+its two backends), `DraftFinalEmail`, `Decide` (reads an `agent_requests`
+row and either dispatches a new task, parks it in `awaiting_user`, or
+finalizes), and `RecordTaskResult` (folds a finished task's outcome back
+into its request and hands it back to
 "awaiting_decision") — following the same `cmd/`-is-thin/
 `internal/`-has-the-logic split used everywhere else in this repo. It has
 no Kafka dependency at all; `internal/kafka` is the separate, thin
@@ -336,19 +345,22 @@ this way (an earlier version bundled the persistent loop into
 - **Redispatch cap**: not asked — defaulting to **3 rounds** before
   forced finalization. Say so if that's too tight or too loose once this
   is actually built.
-- **LLM choice / call shape**: partially resolved — an adapter interface
-  in `internal/agents` with two backends: OpenAI (API key) for prod, and
-  local Ollama (`http://localhost:11434`, no key) so the loop can be
-  simulated and iterated on without burning API spend or needing network
-  access. Which concrete model/prompt shape each backend uses is still
-  open; so is whether prod ever runs against Ollama or it stays dev-only.
-- **`Spec`'s field gap** (`MaxPrice`, bag count, `MinLayoverMinutes`/
-  `MaxLayoverMinutes`, `MaxLegs`/`MaxCountries`/`ExcludedCountries`, a
-  date window): not asked — left unbuilt until the real LLM call lands,
-  same reasoning as "LLM choice" above; see "Spec's concrete fields"
-  above for the full list and which layer each one is missing from. Say
-  so if any should be added to `Spec`/`Params` now, ahead of the LLM
-  call, so the deterministic plumbing is ready when it arrives.
+- **LLM choice / call shape**: resolved and built — `agents.LLMClient`
+  (`internal/agents/llm.go`) with two backends, `OllamaClient` (dev,
+  `qwen2.5:7b`, live-verified) and `OpenAIClient` (prod shape written,
+  not exercised live — no key in this dev environment), picked by
+  `LLM_BACKEND` env var. Still open: whether prod ever runs against
+  Ollama or it stays dev-only, and whether `qwen2.5:7b` is good enough
+  for prod judgment calls — the live runs surfaced real reasoning
+  mistakes (e.g. once mis-read two offers as violating `MaxPrice` when
+  neither did, burning a redispatch round on nothing), which argues for
+  a stronger model in front of anything real users see.
+- **`Spec`'s field gap**: `MaxPrice`, `MinLayoverMinutes`/
+  `MaxLayoverMinutes` built (`agents.FormSpec` fills them from free text,
+  `DecideNextAction` can set them on a retry). Still open: bag count, a
+  date window (so `SearchFlexible` becomes a second dispatchable tool),
+  `MaxLegs`/`MaxCountries`/`ExcludedCountries` — see "Spec's concrete
+  fields" above for which layer each is missing from.
 
 ## Collection scope
 
@@ -1077,9 +1089,10 @@ completed-but-empty search, no separate status string needed the way a
 `Plan`'s own `status` field would.
 
 **Not yet implemented**: `DecideNextAction` (`internal/agents/decide.go`)
-is still the deterministic stub from "Agent loop" and never returns
-`ActionDefer`, and the wake sweep described above isn't written yet
-either — this section describes the target behavior, which the
+is a real LLM call now (see "Agent loop"), but its system prompt tells
+the model never to choose `ActionDefer` — the wake sweep this section
+describes isn't written yet, so there's nothing for a `defer` decision to
+do. This section describes the target behavior, which the
 row-plus-Kafka design already supports without needing anything new
 (unlike the Temporal-dependent version this replaced), but the code path
 itself is still open work.

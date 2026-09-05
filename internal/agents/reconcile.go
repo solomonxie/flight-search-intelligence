@@ -32,53 +32,30 @@ const (
 	StatusAwaitingDecision = "awaiting_decision"
 	StatusDispatched       = "dispatched"
 	StatusDeferred         = "deferred" // not produced yet — DecideNextAction never returns ActionDefer; see DESIGN.md "Booking horizon"
-	StatusFinalized        = "finalized"
+	// StatusAwaitingUser: Decide got ActionAskUser and parked here with
+	// the question in email_body (reusing the same column the finalize
+	// path already uses for its own free-text output — not a separate
+	// schema field). Unlike a dispatched task, nothing is in flight to
+	// wake this request back up: cmd/email-intake -signal explicitly
+	// flips it back to StatusAwaitingDecision and republishes a
+	// DecisionTrigger once the user answers.
+	StatusAwaitingUser = "awaiting_user"
+	StatusFinalized    = "finalized"
 )
-
-// NewRequest builds a fresh Spec + its initial JSON encoding, ready for
-// catalog.CreateAgentRequest — the entry point cmd/email-intake -start
-// calls for a new request.
-func NewRequest(origin, destination, departDate, returnDate string, maxHours float64, queryBudget int, softConstraints []string) (Spec, []byte, error) {
-	spec := Spec{
-		Origin: origin, Destination: destination, DepartDate: departDate, ReturnDate: returnDate,
-		MaxHours: maxHours, QueryBudget: queryBudget, SoftConstraints: softConstraints,
-	}
-	b, err := json.Marshal(spec)
-	if err != nil {
-		return Spec{}, nil, fmt.Errorf("agents: marshaling new spec: %w", err)
-	}
-	return spec, b, nil
-}
-
-// AppendSoftConstraint decodes specJSON, appends text, and re-encodes —
-// how a follow-up email (cmd/email-intake -signal) lands into a request's
-// spec (DESIGN.md "Continuous email / mid-flight interruption"). It's
-// just a database update: whatever step runs next for this request reads
-// the spec fresh, so there's nothing else to notify.
-func AppendSoftConstraint(specJSON []byte, text string) ([]byte, error) {
-	var spec Spec
-	if err := json.Unmarshal(specJSON, &spec); err != nil {
-		return nil, fmt.Errorf("agents: decoding spec: %w", err)
-	}
-	spec.SoftConstraints = append(spec.SoftConstraints, text)
-	b, err := json.Marshal(spec)
-	if err != nil {
-		return nil, fmt.Errorf("agents: encoding spec: %w", err)
-	}
-	return b, nil
-}
 
 // Decide is one request's decision step — what cmd/agent-worker calls
 // after reading a DecisionTrigger off internal/kafka's agent-decisions
 // topic. It loads the row, asks DecideNextAction what to do, and either
 // dispatches a new task (returning its id so the caller can push it onto
-// the search-tasks topic) or finalizes (returning ok=false — the signal
-// to push no further message, which is how the chain stops).
+// the search-tasks topic), parks it in StatusAwaitingUser, or finalizes
+// (the latter two both returning ok=false — the signal to push no
+// further message, which is how the chain stops until something
+// explicit — a task result, or cmd/email-intake -signal — wakes it again).
 //
 // Guards against a stale/duplicate trigger: a request already
 // "dispatched" (still waiting on its current task) or "finalized" is left
 // untouched — decide is only meaningful in "awaiting_decision".
-func Decide(ctx context.Context, db *catalog.SQLite, requestID string) (taskID string, ok bool, err error) {
+func Decide(ctx context.Context, llm LLMClient, db *catalog.SQLite, requestID string) (taskID string, ok bool, err error) {
 	row, err := db.LoadAgentRequest(ctx, requestID)
 	if err != nil {
 		return "", false, err
@@ -96,9 +73,22 @@ func Decide(ctx context.Context, db *catalog.SQLite, requestID string) (taskID s
 		return "", false, fmt.Errorf("agents: decoding rounds for %s: %w", requestID, err)
 	}
 
-	decision, err := DecideNextAction(ctx, spec, rounds)
+	decision, err := DecideNextAction(ctx, llm, spec, rounds)
 	if err != nil {
 		return "", false, fmt.Errorf("agents: DecideNextAction for %s: %w", requestID, err)
+	}
+
+	if decision.Action == ActionAskUser {
+		round := len(rounds) + 1
+		rounds = append(rounds, RoundRecord{Round: round, Spec: spec, Decision: decision})
+		roundsJSON, err := json.Marshal(rounds)
+		if err != nil {
+			return "", false, fmt.Errorf("agents: encoding rounds for %s: %w", requestID, err)
+		}
+		if err := db.SaveAgentRequestState(ctx, requestID, StatusAwaitingUser, roundsJSON, nil, decision.Question, ""); err != nil {
+			return "", false, err
+		}
+		return "", false, nil
 	}
 
 	if decision.Action == ActionDispatch && len(rounds) < RedispatchCap {

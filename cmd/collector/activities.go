@@ -20,8 +20,9 @@ func fetchFare(ctx context.Context, deps routesearch.Deps, req agents.CollectRou
 		DepartDate:        req.DepartDate,
 		MaxHours:          req.MaxHours,
 		QueryBudget:       req.QueryBudget,
-		MinLayoverMinutes: 45,
-		MaxLayoverMinutes: 12 * 60,
+		MaxPrice:          req.MaxPrice,
+		MinLayoverMinutes: req.MinLayoverMinutes,
+		MaxLayoverMinutes: req.MaxLayoverMinutes,
 		PricePerMile:      0.08,
 	})
 	if err != nil {

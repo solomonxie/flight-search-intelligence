@@ -107,6 +107,7 @@ type SearchParams struct {
 	ReturnDate    string // YYYY-MM-DD, optional
 	Adults        int    // defaults to 1
 	MaxStops      *int   // nil = no restriction; see NonstopOnly
+	MaxPrice      *int   // nil = no cap; USD, whole-trip (see routesearch.Params.MaxPrice)
 }
 
 // NonstopOnly is the MaxStops value routesearch's own leg-level queries
@@ -138,6 +139,7 @@ func (p SearchParams) toQuery() Query {
 		Seat:       SeatEconomy,
 		Trip:       trip,
 		Passengers: Passengers{Adults: p.Adults},
+		MaxPrice:   p.MaxPrice,
 		Currency:   "USD",
 	}
 }

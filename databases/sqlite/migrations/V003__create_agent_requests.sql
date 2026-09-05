@@ -7,7 +7,7 @@ CREATE TABLE agent_requests (
 	request_id      TEXT PRIMARY KEY,
 	spec_json       TEXT NOT NULL,
 	rounds_json     TEXT NOT NULL,
-	status          TEXT NOT NULL, -- awaiting_decision | dispatched | deferred | finalized
+	status          TEXT NOT NULL, -- awaiting_decision | dispatched | deferred | awaiting_user | finalized
 	deferred_until  TEXT,
 	email_body      TEXT,
 	finalized_by    TEXT,
