@@ -1,5 +1,5 @@
 .PHONY: build db-init run-collector run-search-api dry-run-route-search dry-run-best-dates \
-	run-routesearch run-email-intake-start run-email-intake-signal \
+	dry-run-route-search-full run-email-intake-start run-email-intake-signal \
 	run-collector-worker run-agent-worker kafka-topics test
 
 build:
@@ -25,7 +25,7 @@ WINDOW_DAYS ?= 20
 
 # routesearch direct-run modes (no Kafka/agent loop) -- see cmd/routesearch's
 # package doc. All three take ORIGIN/DEST/DATE/RETURN/WINDOW_DAYS overrides,
-# e.g. `make run-routesearch ORIGIN=SFO DEST=NRT`.
+# e.g. `make dry-run-route-search-full ORIGIN=SFO DEST=NRT`.
 dry-run-route-search:
 	go run ./cmd/routesearch -origin $(ORIGIN) -destination $(DEST) -date $(DATE) -dry-run
 
