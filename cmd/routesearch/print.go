@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 
 	"flight-search-intelligence/internal/routesearch"
 )
@@ -56,17 +58,46 @@ func printRoundTrip(plan *routesearch.RoundTripPlan) {
 
 func printFlexible(plan *routesearch.FlexiblePlan) {
 	fmt.Printf("\nDate scan (Phase A) — %d date point(s) tried:\n", len(plan.DateScan))
-	fmt.Printf("%-12s %-12s %-9s %s\n", "Depart", "Return", "Price $", "Note")
+
+	// Grouped by price (asc), dates within a group asc — easier to scan
+	// for "which dates hit the cheapest fare" than one row per date.
+	byPrice := map[float64][]string{}
+	var prices []float64
+	var failed []routesearch.DateScanEntry
 	for _, e := range plan.DateScan {
-		price := ""
-		if e.PriceUSD > 0 {
-			price = fmt.Sprintf("%.0f", e.PriceUSD)
+		if e.PriceUSD <= 0 {
+			failed = append(failed, e)
+			continue
 		}
-		marker := ""
+		if _, ok := byPrice[e.PriceUSD]; !ok {
+			prices = append(prices, e.PriceUSD)
+		}
+		label := e.DepartDate
+		if e.ReturnDate != "" {
+			label += "/" + e.ReturnDate
+		}
 		if e.DepartDate == plan.ChosenDepartDate && e.ReturnDate == plan.ChosenReturnDate {
-			marker = "<- chosen"
+			label += " <- chosen"
 		}
-		fmt.Printf("%-12s %-12s %-9s %s %s\n", e.DepartDate, e.ReturnDate, price, e.Reason, marker)
+		byPrice[e.PriceUSD] = append(byPrice[e.PriceUSD], label)
+	}
+	sort.Float64s(prices)
+
+	fmt.Printf("%-9s %s\n", "Price $", "Dates")
+	for _, price := range prices {
+		dates := byPrice[price]
+		sort.Strings(dates) // date-prefixed labels, so lexical == chronological
+		fmt.Printf("%-9.0f %s\n", price, strings.Join(dates, ", "))
+	}
+	if len(failed) > 0 {
+		fmt.Printf("\n%d date(s) with no result:\n", len(failed))
+		for _, e := range failed {
+			label := e.DepartDate
+			if e.ReturnDate != "" {
+				label += "/" + e.ReturnDate
+			}
+			fmt.Printf("  %-24s %s\n", label, e.Reason)
+		}
 	}
 
 	if plan.AnchoredPlanID == "" {
