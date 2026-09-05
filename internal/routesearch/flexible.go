@@ -8,10 +8,10 @@ import (
 	"flight-search-intelligence/internal/googleflights"
 )
 
-// DateSweepEntry is one date (or date pair) tried in Phase A of a
+// DateScanEntry is one date (or date pair) tried in Phase A of a
 // flexible-date search — see DESIGN.md "Round trips and flexible
 // dates".
-type DateSweepEntry struct {
+type DateScanEntry struct {
 	DepartDate string  `json:"depart_date"`
 	ReturnDate string  `json:"return_date,omitempty"`
 	PriceUSD   float64 `json:"price_usd,omitempty"`
@@ -20,24 +20,25 @@ type DateSweepEntry struct {
 }
 
 // FlexibleParams is a flexible-date request: a target date (Base.
-// DepartDate is the sweep window's center) plus how wide/coarse to
-// sweep around it.
+// DepartDate is the scan window's center) plus how wide/coarse to
+// scan around it.
 type FlexibleParams struct {
 	Base           Params // Origin/Destination/MaxHours/QueryBudget/etc — DepartDate is the window's center
 	RoundTrip      bool
 	TripLengthDays int // only used if RoundTrip: return = depart + TripLengthDays, coupled (not a full depart×return grid)
-	WindowDays     int // sweep [center-WindowDays, center+WindowDays]
+	WindowDays     int // scan [center-WindowDays, center+WindowDays]
 	StepDays       int // sample every StepDays within the window; 1 = every day
+	ScanOnly       bool // stop after Phase A (the date scan); skip Phase B's hub search
 }
 
 // FlexiblePlan is the audit trail for a flexible-date search: the full
-// date_sweep (Phase A, cheap baseline-only queries) plus which single
+// date_scan (Phase A, cheap baseline-only queries) plus which single
 // date won and got the full hub search (Phase B) — see AnchoredPlanID
 // for that phase's own detail.
 type FlexiblePlan struct {
 	RequestID        string           `json:"request_id"`
 	Input            FlexibleParams   `json:"input"`
-	DateSweep        []DateSweepEntry `json:"date_sweep"`
+	DateScan         []DateScanEntry  `json:"date_scan"`
 	ChosenDepartDate string           `json:"chosen_depart_date"`
 	ChosenReturnDate string           `json:"chosen_return_date,omitempty"`
 	AnchoredPlanID   string           `json:"anchored_plan_id"`
@@ -47,7 +48,7 @@ type FlexiblePlan struct {
 }
 
 // SearchFlexible runs the two-phase algorithm from DESIGN.md: a cheap
-// baseline-only sweep across the date window (Phase A — one query per
+// baseline-only scan across the date window (Phase A — one query per
 // date point, no hub search), then the full Search/SearchRoundTrip
 // (Phase B, the expensive part) on just the date(s) that won.
 func SearchFlexible(ctx context.Context, deps Deps, p FlexibleParams) (*FlexiblePlan, error) {
@@ -66,16 +67,16 @@ func SearchFlexible(ctx context.Context, deps Deps, p FlexibleParams) (*Flexible
 		step = 1
 	}
 
-	log.Info("phase A: date sweep", "window_days", p.WindowDays, "step_days", step, "round_trip", p.RoundTrip)
+	log.Info("phase A: date scan", "window_days", p.WindowDays, "step_days", step, "round_trip", p.RoundTrip)
 	for offset := -p.WindowDays; offset <= p.WindowDays; offset += step {
-		entry := sweepOneDate(ctx, deps, p, center, offset)
-		plan.DateSweep = append(plan.DateSweep, entry)
-		log.Info("date sweep point", "depart", entry.DepartDate, "return", entry.ReturnDate,
+		entry := scanOneDate(ctx, deps, p, center, offset)
+		plan.DateScan = append(plan.DateScan, entry)
+		log.Info("date scan point", "depart", entry.DepartDate, "return", entry.ReturnDate,
 			"price_usd", entry.PriceUSD, "reason", entry.Reason)
 		sleepPacing(ctx, p.Base.Delay)
 	}
 
-	best := cheapestDateSweepEntry(plan.DateSweep)
+	best := cheapestDateScanEntry(plan.DateScan)
 	if best == nil {
 		plan.Status = "error: no feasible date in window"
 		_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
@@ -84,6 +85,13 @@ func SearchFlexible(ctx context.Context, deps Deps, p FlexibleParams) (*Flexible
 	plan.ChosenDepartDate = best.DepartDate
 	plan.ChosenReturnDate = best.ReturnDate
 	log.Info("phase A winner", "depart", best.DepartDate, "return", best.ReturnDate, "price_usd", best.PriceUSD)
+
+	if p.ScanOnly {
+		plan.Status = "done (scan only, phase B skipped)"
+		_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
+		log.Info("scan-only: skipping phase B")
+		return plan, nil
+	}
 
 	log.Info("phase B: full hub search on the winning date(s)")
 	anchored := p.Base
@@ -116,19 +124,19 @@ func SearchFlexible(ctx context.Context, deps Deps, p FlexibleParams) (*Flexible
 	return plan, nil
 }
 
-// sweepOneDate is one Phase-A query: cheapest-by-price only, no hub
+// scanOneDate is one Phase-A query: cheapest-by-price only, no hub
 // search — the whole point of this phase is staying cheap per date so a
 // wide window is affordable.
-func sweepOneDate(ctx context.Context, deps Deps, p FlexibleParams, center time.Time, offsetDays int) DateSweepEntry {
+func scanOneDate(ctx context.Context, deps Deps, p FlexibleParams, center time.Time, offsetDays int) DateScanEntry {
 	depart := center.AddDate(0, 0, offsetDays).Format("2006-01-02")
-	entry := DateSweepEntry{DepartDate: depart}
+	entry := DateScanEntry{DepartDate: depart}
 
 	if p.RoundTrip {
 		ret := center.AddDate(0, 0, offsetDays+p.TripLengthDays).Format("2006-01-02")
 		entry.ReturnDate = ret
-		offers, _, err := deps.Flights.SearchFlightOffers(ctx, googleflights.SearchParams{
+		offers, _, err := deps.searchOffers(ctx, googleflights.SearchParams{
 			Origin: p.Base.Origin, Destination: p.Base.Destination, DepartureDate: depart, ReturnDate: ret,
-		})
+		}, p.Base.ForceRefresh)
 		entry.Queried = true
 		if err != nil {
 			entry.Reason = err.Error()
@@ -142,15 +150,14 @@ func sweepOneDate(ctx context.Context, deps Deps, p FlexibleParams, center time.
 		return entry
 	}
 
-	offers, _, err := deps.Flights.SearchFlightOffers(ctx, googleflights.SearchParams{
+	offers, _, err := deps.searchOffers(ctx, googleflights.SearchParams{
 		Origin: p.Base.Origin, Destination: p.Base.Destination, DepartureDate: depart,
-	})
+	}, p.Base.ForceRefresh)
 	entry.Queried = true
 	if err != nil {
 		entry.Reason = err.Error()
 		return entry
 	}
-	deps.recordOffers(ctx, p.Base.Origin, p.Base.Destination, depart, offers)
 	if offer, _, ok := pickCheapestFeasible(offers, deps.Graph, p.Base.MaxHours); ok {
 		entry.PriceUSD = float64(offer.Price)
 	} else {
@@ -159,8 +166,8 @@ func sweepOneDate(ctx context.Context, deps Deps, p FlexibleParams, center time.
 	return entry
 }
 
-func cheapestDateSweepEntry(entries []DateSweepEntry) *DateSweepEntry {
-	var best *DateSweepEntry
+func cheapestDateScanEntry(entries []DateScanEntry) *DateScanEntry {
+	var best *DateScanEntry
 	for i := range entries {
 		e := &entries[i]
 		if !e.Queried || e.PriceUSD <= 0 {
