@@ -25,9 +25,9 @@ type DateScanEntry struct {
 type FlexibleParams struct {
 	Base           Params // Origin/Destination/MaxHours/QueryBudget/etc — DepartDate is the window's center
 	RoundTrip      bool
-	TripLengthDays int // only used if RoundTrip: return = depart + TripLengthDays, coupled (not a full depart×return grid)
-	WindowDays     int // scan [center-WindowDays, center+WindowDays]
-	StepDays       int // sample every StepDays within the window; 1 = every day
+	TripLengthDays int  // only used if RoundTrip: return = depart + TripLengthDays, coupled (not a full depart×return grid)
+	WindowDays     int  // scan [center-WindowDays, center+WindowDays]
+	StepDays       int  // sample every StepDays within the window; 1 = every day
 	ScanOnly       bool // stop after Phase A (the date scan); skip Phase B's hub search
 }
 
@@ -164,18 +164,4 @@ func scanOneDate(ctx context.Context, deps Deps, p FlexibleParams, center time.T
 		entry.Reason = "no feasible offer"
 	}
 	return entry
-}
-
-func cheapestDateScanEntry(entries []DateScanEntry) *DateScanEntry {
-	var best *DateScanEntry
-	for i := range entries {
-		e := &entries[i]
-		if !e.Queried || e.PriceUSD <= 0 {
-			continue
-		}
-		if best == nil || e.PriceUSD < best.PriceUSD {
-			best = e
-		}
-	}
-	return best
 }
