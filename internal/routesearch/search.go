@@ -101,6 +101,7 @@ func Search(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 
 		leg1Offers, live, err := deps.searchOffers(ctx, googleflights.SearchParams{
 			Origin: p.Origin, Destination: c.Hub, DepartureDate: p.DepartDate,
+			MaxStops: googleflights.NonstopOnly(),
 		}, p.ForceRefresh)
 		if live {
 			queriesUsed++
@@ -139,6 +140,7 @@ func Search(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 		log.Info("querying leg 2", "hub", c.Hub, "date", leg2Date)
 		leg2Offers, live, err := deps.searchOffers(ctx, googleflights.SearchParams{
 			Origin: c.Hub, Destination: p.Destination, DepartureDate: leg2Date,
+			MaxStops: googleflights.NonstopOnly(),
 		}, p.ForceRefresh)
 		if live {
 			sleepPacing(ctx, p.Delay)
