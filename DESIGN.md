@@ -616,10 +616,9 @@ unbounded fan-out over every airport on Earth):
    if the budget runs out, return the best feasible combo found so far,
    never search exhaustively — the cap is what keeps this from becoming
    the mass-crawl "Collection scope" rules out.
-6. **Depth cap.** 1-stop split-ticket combos by default; 2-stop only
-   behind an explicit "aggressive search" flag — cost grows
-   multiplicatively per extra hop, and so does self-transfer risk (below),
-   for typically thin additional savings.
+6. **Depth cap.** 1-stop split-ticket combos by default — cost grows
+   multiplicatively per extra hop, and so does self-transfer risk (below).
+   Raisable via `MaxLegs`; see "Deeper itineraries" below.
 
 ### Exploration algorithm
 
@@ -737,6 +736,76 @@ scrapes, the A\*-style bound) as one in-process function under one
 decided there applying uniformly to every task regardless of how many
 legs it scrapes internally. What's new here is entirely `routesearch`
 *logic*, not new components.
+
+### Deeper itineraries: N-hop search and hop-country constraints
+
+Extends "Generalizing beyond 1-stop" above from "2-stop behind a flag" to
+an arbitrary depth, for a traveler type the design so far didn't have:
+price beats everything else including comfort — many legs, a long total
+elapsed time, several transfers, all acceptable if the itinerary is
+cheaper. `MaxLegs` and `MaxHours` become **tunable fields on the existing
+`Params`**, not a separate request type — same `Search` function, same
+audit trail shape, just a caller (person or agent) free to set e.g.
+`MaxLegs: 5, MaxHours: 48` instead of leaving the (unchanged) defaults.
+
+**`MaxLegs` raises the depth cap, it doesn't remove it.** The
+label-setting algorithm from "Generalizing beyond 1-stop" runs unchanged
+past 2 hops — a state is still `(node, arrival_time, price_so_far,
+duration_so_far, legs_so_far)`, discarded the moment another label at the
+same node dominates it. `legs_so_far` is now also a hard cutoff: no label
+expands past `MaxLegs`. Cost is genuinely multiplicative per extra hop —
+candidate hubs at hop 2 branch into candidates at hop 3 branch into hop
+4 — so `QUERY_BUDGET` (same concept, likely needs to rise for this case)
+is what keeps a 5-leg request from becoming exhaustive, same as it
+already keeps 1-stop from becoming exhaustive today.
+
+**Country/region hop constraints — a new edge filter, cheap to apply.**
+OpenFlights' airport table already carries `Country` per airport
+(`internal/openflights`), so this is a filter on the existing
+geometry-prune step (before any scrape), not a new data source:
+
+- **`MaxCountries`** (or `MaxRegions`, once a country→region mapping
+  exists — see open decision below): caps how many distinct countries a
+  candidate path may transit, independent of `MaxLegs` — a 4-leg
+  itinerary that never leaves one country's domestic network is a
+  different risk profile from one hopping 4 countries.
+- **`ExcludedCountries`** (a hard prune, not a soft preference): any
+  candidate hub in an excluded country is dropped at the geometry-prune
+  stage, before it ever becomes a scrape. This is where a visa
+  ineligibility, a conflict-zone/sanctions concern, or an
+  identity-based travel restriction lives — a real constraint the search
+  must never route through, not a preference a Pareto ranking merely
+  deprioritizes.
+- **The exclusion list's source is the agent loop, not `routesearch`.**
+  Per "Agent loop: LLM drives the search, Go stays narrow" above: whether
+  a user's stated passport/visa situation or a mentioned conflict zone
+  should become an `ExcludedCountries` entry is exactly the judgment call
+  that section already reserves for the LLM — not a Go struct field's
+  job to infer. `routesearch` only ever receives the already-decided
+  list; it never derives one itself from, say, a passport mentioned in
+  an email.
+
+**Other per-hop conditions**: raised as a category, not yet enumerated —
+e.g. a minimum layover that scales with `MaxLegs` (a 6-hour minimum
+connection makes sense at 1 hop, less so budgeted 4 times over a 48-hour
+trip), overnight-layover handling, or a max single-leg duration
+independent of the total cap. Flagged here as real and likely, deferred
+until a concrete one is actually needed rather than guessed at now.
+
+**Open decisions**:
+- **Max depth**: was "1-stop only, 2-stop behind an opt-in flag" — now
+  **`MaxLegs`, a tunable `Params` field, default unchanged** (still
+  1-stop). Say so if you want a different default, or a hard ceiling
+  above which even an explicit request is rejected.
+- **Country/region exclusion**: not asked — no `ExcludedCountries` /
+  `MaxCountries` field exists yet. Say so if you want it added to
+  `Params` now, and whether country-only is enough to start or region
+  (needing a country→region mapping, which doesn't exist yet) is needed
+  too.
+- **Query budget at depth**: not asked — `QUERY_BUDGET` stays a flat
+  default today; a 5-leg search plausibly needs a higher one. Say so if
+  you want it to scale with `MaxLegs` automatically, or stay a single
+  manually-set number.
 
 ### Round trips and flexible dates
 
@@ -1025,8 +1094,9 @@ doc — say so if you'd rather change them):
 - **Query budget**: not asked — defaulting to **20 scrapes/request**,
   now read as a cost/scope cap rather than a latency cap (see above).
   Say so if you want it higher/lower, or configurable per request.
-- **Max depth**: not asked — defaulting to **1-stop only**, with 2-stop
-  behind an opt-in flag.
+- **Max depth**: see "Deeper itineraries: N-hop search and hop-country
+  constraints" above — `MaxLegs`, a tunable `Params` field, default
+  still 1-stop.
 - **Query spacing**: not asked — defaulting to a **random 5–30 minute
   in-process delay between scrapes**. Say so if you want it tighter/looser.
 - **Self-transfer risk disclosure**: not asked — defaulting to **always
