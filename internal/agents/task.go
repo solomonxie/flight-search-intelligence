@@ -10,12 +10,15 @@ package agents
 // cmd/collector depends on this type; this package does not depend on
 // cmd/collector, keeping the import direction one-way.
 type CollectRouteRequest struct {
-	Origin      string
-	Destination string
-	DepartDate  string
-	ReturnDate  string
-	MaxHours    float64
-	QueryBudget int
+	Origin            string
+	Destination       string
+	DepartDate        string
+	ReturnDate        string
+	MaxHours          float64
+	QueryBudget       int
+	MaxPrice          int // USD hard ceiling on the whole trip; 0 = no cap
+	MinLayoverMinutes int
+	MaxLayoverMinutes int
 }
 
 // CollectRouteResult is the structured result a dispatched search returns —

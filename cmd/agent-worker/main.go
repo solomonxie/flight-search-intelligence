@@ -46,12 +46,17 @@ func run() error {
 	}
 	defer db.Close()
 
+	llmClient, err := agents.NewLLMClientFromEnv()
+	if err != nil {
+		return fmt.Errorf("building LLM client: %w", err)
+	}
+
 	consumer := kafka.NewConsumer(brokers, kafka.TopicAgentDecisions, "agent-worker")
 	defer consumer.Close()
 	producer := kafka.NewProducer(brokers, kafka.TopicSearchTasks)
 	defer producer.Close()
 
-	fmt.Printf("agent-worker: consuming %q at %v, db %s\n", kafka.TopicAgentDecisions, brokers, dbPath)
+	fmt.Printf("agent-worker: consuming %q at %v, db %s, LLM backend %T\n", kafka.TopicAgentDecisions, brokers, dbPath, llmClient)
 	ctx := context.Background()
 
 	for {
@@ -62,7 +67,7 @@ func run() error {
 			continue // a decode failure still returns a commit func (see internal/kafka); anything else, just retry
 		}
 
-		taskID, dispatched, err := agents.Decide(ctx, db, trig.RequestID)
+		taskID, dispatched, err := agents.Decide(ctx, llmClient, db, trig.RequestID)
 		if err != nil {
 			// Deliberately not committed: this request's decision didn't
 			// actually get made, so the message is left for a retry

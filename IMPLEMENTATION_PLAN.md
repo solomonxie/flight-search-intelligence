@@ -60,40 +60,50 @@ which nothing downstream can actually exercise from an email until the
 agent loop can turn a request into a `Spec` and act on it. Depends on
 Phase 1 (the loop to plug into).
 
-- [ ] `agents.LLMClient`: adapter interface (one chat/structured-output
+- [x] `agents.LLMClient`: adapter interface (one chat/structured-output
       method) so `DecideNextAction` and spec-formation below never call a
-      specific provider's SDK directly
-- [ ] Two backends behind it: OpenAI (API key from env) for prod, and a
-      local Ollama backend (`http://localhost:11434`, no key) for
-      simulation/dev — selectable via config/flag, not a compile-time
-      branch. Ollama's already installed and running locally
-      (`brew services start ollama`) with `llama3.1:8b`/`qwen2.5:7b`
-      pulled, ready to point this at
-- [ ] `agents.Spec`: add `MinLayoverMinutes`/`MaxLayoverMinutes` (already
-      on `routesearch.Params`, just missing from `Spec`)
-- [ ] `routesearch.Params`: add `MaxPrice int`, enforce in
-      `pickCheapestFeasible`/`bestConnection` (`scoring.go`); then add to
-      `googleflights.SearchParams` → `Query.MaxPrice` (already wired,
-      `protobuf.go:125`) and up to `agents.Spec`
+      specific provider's SDK directly — `internal/agents/llm.go`
+- [x] Two backends behind it: OpenAI (API key from env) for prod
+      (written, not exercised live — no key in this dev environment), and
+      a local Ollama backend (`http://localhost:11434`, no key) for
+      simulation/dev — selectable via `LLM_BACKEND` env var, not a
+      compile-time branch — `internal/agents/ollama.go`,
+      `internal/agents/openai.go`
+- [x] `agents.Spec`: add `MinLayoverMinutes`/`MaxLayoverMinutes` (already
+      on `routesearch.Params`, just missing from `Spec`) — and
+      `MaxPrice`, done alongside it
+- [x] `routesearch.Params`: add `MaxPrice int`, enforce in
+      `pickCheapestFeasible`/`bestConnection` (`scoring.go`); wired to
+      `googleflights.SearchParams` → `Query.MaxPrice` (already encoded)
+      and up to `agents.Spec`
 - [ ] `agents.Spec`: add a date-window shape (reuse `FlexibleParams`'
       window/step fields) so `SearchFlexible` becomes a dispatchable tool
-      from the agent loop, not just `CollectRouteRequest`
-- [ ] Real spec formation: turn free-text (the `-start` request text,
+      from the agent loop, not just `CollectRouteRequest` — deferred,
+      not needed to exercise the decision core itself
+- [x] Real spec formation: turn free-text (the `-start` request text,
       `-signal` follow-ups) into `Spec`'s concrete fields +
-      `SoftConstraints` via `LLMClient` — replaces `cmd/email-intake`
-      building `Spec` straight from CLI flags and `AppendSoftConstraint`
-      appending raw text unread
-- [ ] `agents.Action`: add `ActionAskUser` (+ a `Question` field on
+      `SoftConstraints` via `LLMClient` — `agents.FormSpec`
+      (`internal/agents/formspec.go`), one function for both callers;
+      replaced `cmd/email-intake` building `Spec` from CLI flags and the
+      old `AppendSoftConstraint`/`NewRequest` (removed, both dead code
+      once `FormSpec` took over)
+- [x] `agents.Action`: add `ActionAskUser` (+ a `Question` field on
       `Decision`) — DESIGN.md step 2's fourth move, for a genuinely
       underspecified spec, distinct from `ActionDefer`
-- [ ] Replace the `DecideNextAction` stub with a real `LLMClient` call:
+- [x] Replace the `DecideNextAction` stub with a real `LLMClient` call:
       given `Spec` + round history, choose dispatch (with what
       arguments) / ask-user / exclude-and-retry-with-new-filters /
-      finalize — the judgment call DESIGN.md's loop step 4-5 describes
-- [ ] Verify live against the local Ollama backend: one deliberately
-      underspecified request (asks a clarifying question), one complete
-      request (dispatches straight away), one where round 1's result
-      should be excluded and retried with tighter filters
+      finalize — the judgment call DESIGN.md's loop step 4-5 describes.
+      `ActionDefer` stays unproduced: the system prompt tells the model
+      never to choose it, since its wake-sweep still isn't built
+- [x] Verify live against the local Ollama backend (`qwen2.5:7b`): one
+      deliberately underspecified request (asked "What is the departure
+      airport?", parked in the new `awaiting_user` status), one complete
+      request (dispatched immediately, finalized with a real scraped
+      offer), one soft-constraint violation (self-transfer result
+      correctly recognized as not "good enough" and retried rather than
+      finalized). Real transcripts (prompt + raw reply) captured for all
+      three — see conversation, not reproduced here
 
 ## Phase 3: Deeper itineraries — N-hop search + hop-country constraints
 

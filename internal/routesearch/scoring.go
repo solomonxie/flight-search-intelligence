@@ -8,15 +8,34 @@ import (
 	"flight-search-intelligence/internal/openflights"
 )
 
+// maxPricePtr converts Params.MaxPrice's "0 = unset" convention to
+// googleflights.SearchParams.MaxPrice's "nil = unset" one, for the
+// whole-trip (baseline/date-scan) queries that pass it down to Google's
+// own query — see pickCheapestFeasible's doc for why leg-only queries
+// don't.
+func maxPricePtr(maxPrice int) *int {
+	if maxPrice <= 0 {
+		return nil
+	}
+	return &maxPrice
+}
+
 // pickCheapestFeasible returns the cheapest offer whose real (timezone-
 // aware) trip duration fits maxHours, and that duration.
-func pickCheapestFeasible(offers []googleflights.Offer, graph *openflights.Graph, maxHours float64) (googleflights.Offer, time.Duration, bool) {
+// maxPriceUSD is the whole-trip price ceiling to enforce here (0 = no
+// cap) — only meaningful when offers are already whole-trip prices
+// (a direct/baseline query), not a single leg of a split ticket; see
+// call sites.
+func pickCheapestFeasible(offers []googleflights.Offer, graph *openflights.Graph, maxHours, maxPriceUSD float64) (googleflights.Offer, time.Duration, bool) {
 	var best googleflights.Offer
 	var bestDur time.Duration
 	found := false
 	for _, o := range offers {
 		dur, ok := tripDuration(o, graph)
 		if !ok || dur.Hours() > maxHours {
+			continue
+		}
+		if maxPriceUSD > 0 && float64(o.Price) > maxPriceUSD {
 			continue
 		}
 		if !found || o.Price < best.Price {
@@ -50,6 +69,9 @@ func (d Deps) bestConnection(leg1 googleflights.Offer, leg2Offers []googleflight
 		}
 		tot := leg1Dur + lay + leg2Dur
 		if tot.Hours() > p.MaxHours {
+			continue
+		}
+		if p.MaxPrice > 0 && leg1.Price+o.Price > p.MaxPrice {
 			continue
 		}
 		if !found || o.Price < best.Price {
