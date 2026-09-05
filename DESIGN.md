@@ -154,11 +154,12 @@ or to stop.
 **The loop itself**:
 1. **Form/update the spec.** Turn the email thread so far (initial
    request + every follow-up) into a structured spec: the concrete,
-   machine-checkable part (origin, destination, date window, max price,
-   max hours, max stops...) *and* a running list of soft constraints in
+   machine-checkable part *and* a running list of soft constraints in
    plain language (e.g. "must be there for Christmas," "traveling with
    an infant, avoid very long single itinerary") — the second list
    doesn't become new Go fields; it stays something only the agent reads.
+   See "Spec's concrete fields" below for exactly which of the two lists
+   each constraint type belongs in.
 2. **Decide the next action**: call one tool with a chosen set of
    concrete arguments; defer (booking horizon, or "wait, the user might
    still be adding context"); or finalize.
@@ -183,6 +184,61 @@ or to stop.
    LLM-drafting idea already in "Components") and, for a not-fully-solved
    case, say so honestly rather than presenting a partial answer as
    final.
+
+**Spec's concrete fields, precisely — and the gap between this and what's
+built.** The rule for which list a constraint goes in isn't "how
+important is it," it's "can Go check it mechanically": anything a
+`routesearch.Params`-shaped struct can express as a typed field belongs
+in the concrete half, regardless of how it entered the spec (a first
+email might state a hard price ceiling as plainly as the origin
+airport). Everything else — a judgment call needing context, not a
+threshold — stays in `SoftConstraints`.
+
+- **Concrete today, and already built**: `Origin`, `Destination`,
+  `DepartDate`, `ReturnDate`, `MaxHours`.
+- **Concrete, plumbing exists lower down but nothing above it sets it
+  yet**: `MaxPrice` and a checked/carry-on bag count — both are already
+  full protobuf fields on `googleflights.Query` (`MaxPrice`,
+  `CarryOnBags`, `CheckedBags`; see "Baggage cost is a query input, not a
+  scoring adjustment" below), just never threaded up through
+  `SearchParams` → `routesearch.Params` → `agents.Spec`.
+- **Concrete, built in `routesearch.Params` but missing from
+  `agents.Spec`**: `MinLayoverMinutes`/`MaxLayoverMinutes` — a real gap
+  independent of the LLM being stubbed: today's agent loop can't set
+  these even in principle, because `Spec` doesn't carry them.
+  `QueryBudget` is the mirror case the other way: on `Spec` already, so
+  the agent *can* set it, but nowhere does an email's "how thorough a
+  search do you want" map to it today.
+- **Concrete, designed but not built anywhere**: `MaxLegs`,
+  `MaxCountries`, `ExcludedCountries` (see "Deeper itineraries" above) —
+  a date *window* as a first-class request shape rather than one exact
+  date is `FlexibleParams`, already built, just not yet a field
+  `SearchFlexible`'s caller can set from an email-derived spec either.
+- **Soft, and staying that way — DESIGN.md already names why**: holiday/
+  occasion timing judgment calls, "avoid a very long single itinerary"-
+  style vague comfort preferences, anything where the *email's wording*
+  carries meaning a numeric field can't — this is what `SoftConstraints`
+  is for, not a to-do list of fields to eventually add.
+
+None of the "concrete, not built" rows above are hard to add — they're
+mechanical plumbing once the LLM call itself exists (still deferred, see
+"Open decisions") — flagged here so "the agent will handle price/layover/
+country limits" isn't assumed true of the current build.
+
+**Baggage cost is a query input, not a scoring adjustment.** A cheap
+fare with 2 checked bags priced separately can lose to a pricier one
+that includes them — but the fix isn't a bag-fee cost model bolted onto
+`routesearch`'s scoring. Google Flights' own query already accepts a bag
+count (`Query.CarryOnBags`/`CheckedBags`, wired into the protobuf today)
+and returns `Offer.Price` **already inclusive** of bag fees for carriers
+that price them separately. So once a bag count reaches `SearchParams`,
+every downstream consumer — `pickCheapestFeasible`, the Pareto set,
+`bestConnection` — needs *zero* changes: they already just compare
+`Offer.Price`, and that price becomes bag-inclusive for free. The only
+work is the same mechanical plumbing named above, not new comparison
+logic. (Known limitation, not fixable here: Google's own bag-fee
+display isn't perfectly complete for every low-cost carrier — inherited,
+not something this codebase can correct.)
 
 **The loop degenerates gracefully for the simple case.** A precise,
 unambiguous request (most `search-api` misses, and plenty of plain
@@ -280,6 +336,13 @@ this way (an earlier version bundled the persistent loop into
   is actually built.
 - **LLM choice / call shape**: not asked — deferred entirely; not worth
   deciding until the deterministic side this depends on is done.
+- **`Spec`'s field gap** (`MaxPrice`, bag count, `MinLayoverMinutes`/
+  `MaxLayoverMinutes`, `MaxLegs`/`MaxCountries`/`ExcludedCountries`, a
+  date window): not asked — left unbuilt until the real LLM call lands,
+  same reasoning as "LLM choice" above; see "Spec's concrete fields"
+  above for the full list and which layer each one is missing from. Say
+  so if any should be added to `Spec`/`Params` now, ahead of the LLM
+  call, so the deterministic plumbing is ready when it arrives.
 
 ## Collection scope
 
