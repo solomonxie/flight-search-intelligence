@@ -72,6 +72,9 @@ func parseOffers(html []byte) (offers []Offer, err error) {
 		k := asSlice(kRaw)
 		flight := asSlice(idx(k, 0))
 		price := asInt(idx(asSlice(idx(asSlice(idx(k, 1)), 0)), 1))
+		if price <= 0 {
+			continue // unparseable/missing price field, not a real free fare
+		}
 
 		var segments []Segment
 		for _, sfRaw := range asSlice(idx(flight, 2)) {
