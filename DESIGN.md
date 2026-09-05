@@ -162,7 +162,9 @@ or to stop.
    each constraint type belongs in.
 2. **Decide the next action**: call one tool with a chosen set of
    concrete arguments; defer (booking horizon, or "wait, the user might
-   still be adding context"); or finalize.
+   still be adding context"); **ask the user a clarifying question** (the
+   spec is genuinely underspecified — e.g. no return date and no
+   indication it's one-way — not just "could be narrower"); or finalize.
 3. **Dispatch and await.** A tool call is one row inserted into
    `agent_tasks`, plus a tiny Kafka message ("this task is ready to run")
    — the agent doesn't run `routesearch` itself, it hands the request off
@@ -334,8 +336,12 @@ this way (an earlier version bundled the persistent loop into
 - **Redispatch cap**: not asked — defaulting to **3 rounds** before
   forced finalization. Say so if that's too tight or too loose once this
   is actually built.
-- **LLM choice / call shape**: not asked — deferred entirely; not worth
-  deciding until the deterministic side this depends on is done.
+- **LLM choice / call shape**: partially resolved — an adapter interface
+  in `internal/agents` with two backends: OpenAI (API key) for prod, and
+  local Ollama (`http://localhost:11434`, no key) so the loop can be
+  simulated and iterated on without burning API spend or needing network
+  access. Which concrete model/prompt shape each backend uses is still
+  open; so is whether prod ever runs against Ollama or it stays dev-only.
 - **`Spec`'s field gap** (`MaxPrice`, bag count, `MinLayoverMinutes`/
   `MaxLayoverMinutes`, `MaxLegs`/`MaxCountries`/`ExcludedCountries`, a
   date window): not asked — left unbuilt until the real LLM call lands,
