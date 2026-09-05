@@ -118,7 +118,7 @@ func (s *SQLite) InsertFlightPrices(ctx context.Context, rows []FlightPrice) err
 func (s *SQLite) CachedPriceCents(ctx context.Context, origin, destination, departDate string) (cents int64, ok bool, err error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT MIN(price_cents) FROM flight_prices
-		WHERE origin = ? AND destination = ? AND depart_date = ? AND return_date = ''`,
+		WHERE origin = ? AND destination = ? AND depart_date = ? AND return_date = '' AND price_cents > 0`,
 		origin, destination, departDate)
 
 	var n sql.NullInt64
