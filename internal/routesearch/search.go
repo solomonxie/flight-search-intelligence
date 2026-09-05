@@ -63,7 +63,9 @@ func Search(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 	// Always rank[0], ahead of every hub candidate below — it's what
 	// every candidate is measured against, not just another option.
 	plan.CandidatesRanked = append(plan.CandidatesRanked, baseline)
-	sleepPacing(ctx, p.Delay)
+	if live {
+		sleepPacing(ctx, p.Delay)
+	}
 
 	// Step 1: candidate hubs, geometry-pruned (pure arithmetic, no
 	// scrapes) and price-ranked (cache-first, else distance × $/mile).
@@ -97,12 +99,12 @@ func Search(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 		outcome := CandidateOutcome{Hub: c.Hub, LBUSD: c.LBUSD, Rank: i + 1}
 		log.Info("querying leg 1", "hub", c.Hub, "lb_usd", c.LBUSD)
 
-		sleepPacing(ctx, p.Delay)
 		leg1Offers, live, err := deps.searchOffers(ctx, googleflights.SearchParams{
 			Origin: p.Origin, Destination: c.Hub, DepartureDate: p.DepartDate,
 		}, p.ForceRefresh)
 		if live {
 			queriesUsed++
+			sleepPacing(ctx, p.Delay)
 		}
 
 		leg1, _, ok := pickCheapestFeasible(leg1Offers, deps.Graph, p.MaxHours)
@@ -135,11 +137,11 @@ func Search(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 		// overnight leg 1 landing the day after DepartDate.
 		leg2Date := dateString(leg1.Segments[len(leg1.Segments)-1].ArrivalDate)
 		log.Info("querying leg 2", "hub", c.Hub, "date", leg2Date)
-		sleepPacing(ctx, p.Delay)
 		leg2Offers, live, err := deps.searchOffers(ctx, googleflights.SearchParams{
 			Origin: c.Hub, Destination: p.Destination, DepartureDate: leg2Date,
 		}, p.ForceRefresh)
 		if live {
+			sleepPacing(ctx, p.Delay)
 			queriesUsed++
 		}
 
