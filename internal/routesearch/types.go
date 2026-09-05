@@ -102,5 +102,6 @@ type CandidatePreview struct {
 	HasNonstop                   bool
 	CandidatesConsidered         int
 	CandidatesAfterGeometryPrune int
+	DirectRow                    RankedHub // display only; Search never scrapes this — see ResolveCandidates
 	RankedHubs                   []RankedHub
 }
