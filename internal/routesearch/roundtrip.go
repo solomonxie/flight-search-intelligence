@@ -150,26 +150,3 @@ func combineRoundTrip(plan *RoundTripPlan, outboundBest, returnBest *Result, sum
 		return nil
 	}
 }
-
-func cheapestResult(results []Result) *Result {
-	best := results[0]
-	for _, r := range results[1:] {
-		if r.PriceUSD < best.PriceUSD {
-			best = r
-		}
-	}
-	return &best
-}
-
-func cheapestOffer(offers []googleflights.Offer) (googleflights.Offer, bool) {
-	if len(offers) == 0 {
-		return googleflights.Offer{}, false
-	}
-	best := offers[0]
-	for _, o := range offers[1:] {
-		if o.Price < best.Price {
-			best = o
-		}
-	}
-	return best, true
-}
