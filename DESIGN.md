@@ -31,37 +31,36 @@ scrape volume to actual requests (see "Collection scope" below).
 │ email intake │                  │
 │ (SES inbound)│                  │
 └──────┬───────┘                  │
-       │ start, or signal an      │ start (simple case:
-       │ already-running agent    │ no LLM round-trip
-       ▼                          │ needed — see "Agent loop")
+       │ create a row, publish a  │ create a row, publish a
+       │ DecisionTrigger (simple  │ DecisionTrigger (simple
+       ▼ case: no LLM needed)     │ case, same as email)
       ┌──────────────────────────────┐
-      │   Agent loop (row in the     │
-      │   agent_requests table) —    │
-      │   see "Agent loop: LLM       │
-      │   drives the search" below.  │
-      │   Decides: dispatch a tool   │
-      │   call, defer, or finalize.  │
+      │      cmd/agent-worker        │
+      │  consumes agent-decisions;   │
+      │  see "Agent loop: LLM        │
+      │  drives the search" below.   │
+      │  Decides: dispatch a tool    │
+      │  call, defer, or finalize —  │
+      │  finalize = publish nothing  │
+      │  further, chain just ends.   │
       └───────────────┬───────────────┘
-                       │ dispatch (a tool call) = one
-                       │ INSERT into agent_tasks
-                       ▼
-      ┌──────────────────────────────┐
-      │   agent_tasks table          │
-      │   (status: pending)          │
-      └───────────────┬───────────────┘
-                       │ polled + claimed
+                       │ dispatch (a tool call) =
+                       │ INSERT into agent_tasks +
+                       │ publish {task_id} onto
+                       │ search-tasks
                        ▼
       ┌──────────────────────────────┐
       │         cmd/collector        │
-      │  -worker: claims a pending   │
-      │  task, runs the fetch, and   │
-      │  writes the result back      │
+      │  -worker: consumes           │
+      │  search-tasks, runs the      │
+      │  fetch, writes the result    │
       └───────────────┬───────────────┘
-                       │ result picked up on the
-                       │ agent loop's next poll tick —
-                       │ may loop back to dispatch
-                       │ again with different
-                       │ parameters, or continue ▼
+                       │ publishes {request_id}
+                       │ back onto agent-decisions —
+                       │ wakes the next round; may
+                       │ loop back to dispatch again
+                       │ with different parameters,
+                       │ or continue ▼
                        ▼
       ┌──────────────────────────────┐
       │        internal/routesearch  │
@@ -106,14 +105,15 @@ scrape volume to actual requests (see "Collection scope" below).
 ## Agent loop: LLM drives the search, Go stays narrow
 
 **Status: a first draft of the loop mechanics is built (`internal/agents`,
-`cmd/collector -worker`, `cmd/email-intake`) — ahead of the sequencing
-this section originally called for ("no LLM gets wired in until the
-deterministic Go side is solid"), at explicit request, as a prototype of
-the control flow. The decision step (`DecideNextAction`) is still a
-deterministic stub, not a real LLM call** — see `internal/agents/decide.go`
-— so what's actually proven out so far is the *loop*, not the judgment
-calls it exists to make. Treat everything below as the built shape, with
-the LLM call itself still an open decision (see "Open decisions").
+`internal/kafka`, `cmd/agent-worker`, `cmd/collector -worker`,
+`cmd/email-intake`) — ahead of the sequencing this section originally
+called for ("no LLM gets wired in until the deterministic Go side is
+solid"), at explicit request, as a prototype of the control flow. The
+decision step (`DecideNextAction`) is still a deterministic stub, not a
+real LLM call** — see `internal/agents/decide.go` — so what's actually
+proven out so far is the *loop*, not the judgment calls it exists to
+make. Treat everything below as the built shape, with the LLM call
+itself still an open decision (see "Open decisions").
 
 **The reframing**: the backend is not "deterministic pipeline with an
 LLM bolted on at the email boundary" — it's an **agent loop**. An LLM
@@ -163,9 +163,11 @@ or to stop.
    concrete arguments; defer (booking horizon, or "wait, the user might
    still be adding context"); or finalize.
 3. **Dispatch and await.** A tool call is one row inserted into
-   `agent_tasks` — the agent doesn't run `routesearch` itself, it hands
-   off the request and waits for the row's result, exactly as the rest of
-   this document describes ("Collector task dispatch" below).
+   `agent_tasks`, plus a tiny Kafka message ("this task is ready to run")
+   — the agent doesn't run `routesearch` itself, it hands the request off
+   and gets woken up again by another message once a result exists,
+   exactly as the rest of this document describes ("Collector task
+   dispatch" below).
 4. **Examine the result against the full spec** — concrete constraints
    already got enforced by the Go side (a result violating `MaxHours`
    simply isn't in `Plan.FinalResult`); the agent's own job here is
@@ -196,30 +198,37 @@ row, keyed by `request_id` so email intake can find it again — not a
 running process. A reply to an existing thread doesn't start a new
 request, it's an `UPDATE agent_requests SET spec_json = ...` against the
 row already tracking that thread (`cmd/email-intake -signal` today; a
-real SES reply handler later).
+real SES reply handler later) — no message needed for this one, since
+whatever step runs next for that request reads the spec fresh from the
+row anyway.
 
-**No workflow engine backs this, on purpose — see `internal/agents`'
-package doc for the reasoning.** Durability comes from the row itself,
-not a replay log: every step (a task dispatched, a result examined, a
-decision made) commits to `agent_requests`/`agent_tasks` before the
-function that made it returns. A crash between polls loses nothing,
-because nothing was ever held only in memory. "Async" here means
-dispatching a search never blocks — it's an `INSERT` that returns
-immediately; `cmd/collector -worker` claims and runs it on its own
-schedule, in its own goroutine.
+**No workflow engine backs this, on purpose — see `internal/agents`' and
+`internal/kafka`'s package docs for the reasoning.** Durability comes
+from the row itself, not a replay log: every step (a task dispatched, a
+result examined, a decision made) commits to
+`agent_requests`/`agent_tasks` before the function that made it returns.
+A crash mid-step loses nothing, because nothing was ever held only in
+memory. "Async" here means two things at once: dispatching a search
+never blocks (it's an `INSERT` plus a published message, both of which
+return immediately), and no process sits there checking a clock to see
+if it's time to do something — a step only runs because a Kafka message
+said so, pushed by whatever just happened (a search finished, an email
+arrived). An earlier version of this design used a poll loop (a
+`cmd/email-intake -worker` checking the database every few seconds)
+instead of Kafka messages — replaced because polling only notices a
+change up to one interval late and has to keep checking even when
+nothing's happening; a pushed message reacts immediately and costs
+nothing between messages.
 
-**Reacting to a follow-up mid-dispatch, not just between rounds**, is
-handled by the same mechanism, just looser than a language-level
-`select`: a follow-up updates `spec_json` regardless of what the request's
-`status` currently is, so a request sitting in `dispatched` (a task
-already in flight) picks up the new constraint the moment it's back to
-`awaiting_decision` — no explicit "wait on two things at once" code
-needed, at the cost of reacting on the next poll tick rather than
-instantly. At this project's days-scale SLA (see "Pacing"), a poll
-interval measured in seconds is not a real cost. There's also no need to
-cancel an in-flight task when a follow-up lands — same as the original
-reasoning: let it keep running and decide, once its result is in, whether
-the new context changes anything.
+**Reacting to a follow-up mid-dispatch** doesn't need anything like a
+language-level "wait on two things at once": a follow-up updates
+`spec_json` regardless of what the request's `status` currently is, so a
+request sitting in `dispatched` (a task already in flight) picks up the
+new constraint the moment `RecordTaskResult` hands it back to
+`awaiting_decision` and `Decide` reads the row fresh. There's also no
+need to cancel an in-flight task when a follow-up lands — same reasoning
+as before: let it keep running and decide, once its result is in,
+whether the new context changes anything.
 
 **Termination is still bounded, same principle as the query budget, one
 level up.** An agent that can always decide "let's try one more idea"
@@ -241,18 +250,25 @@ only way to catch it inferring something the email never actually said.
 
 **Where this lives in the repo — resolved, built**: `internal/agents`
 holds the loop's logic — `DecideNextAction` (the stub LLM-call
-stand-in), `DraftFinalEmail`, and `AdvanceRequest` (the state-machine step
-function that reads an `agent_requests` row and does exactly one thing:
-examine a finished task, dispatch a new one, or finalize) — following the
-same `cmd/`-is-thin/`internal/`-has-the-logic split used everywhere else
-in this repo. `cmd/email-intake` runs the poll loop that calls
-`AdvanceRequest` for every non-finalized request (`-worker`), plus the
-dev CLI standing in for SES inbound (`-start`, `-signal`); it is the SES
-inbound handler in prod, same as before. `cmd/collector -worker` is the
-separate poll loop that claims and runs `agent_tasks` rows — kept as its
-own process from `cmd/email-intake`, since "decide what to search" and
-"do one search" stay different concerns even without Temporal's
-task-queue mechanism drawing that line for us.
+stand-in), `DraftFinalEmail`, `Decide` (reads an `agent_requests` row and
+either dispatches a new task or finalizes), and `RecordTaskResult` (folds
+a finished task's outcome back into its request and hands it back to
+"awaiting_decision") — following the same `cmd/`-is-thin/
+`internal/`-has-the-logic split used everywhere else in this repo. It has
+no Kafka dependency at all; `internal/kafka` is the separate, thin
+messaging layer both consumers below import.
+
+`cmd/agent-worker` is a new, persistent background process — the only
+one whose whole job is running the decision loop: it consumes
+`internal/kafka`'s `agent-decisions` topic and calls `Decide` for each
+message. `cmd/collector -worker` is the other persistent background
+process, consuming `search-tasks` and calling `RecordTaskResult` once a
+fetch finishes, then publishing the next `agent-decisions` message
+itself. `cmd/email-intake` is deliberately *not* persistent — one-shot
+only (`-start`, `-signal`), the same way one incoming email triggers one
+action rather than needing its own always-running process; splitting it
+this way (an earlier version bundled the persistent loop into
+`cmd/email-intake -worker`) keeps a name meaning one thing.
 
 **Open decisions**:
 - **Tool contract**: not asked — the four tools named above
@@ -282,38 +298,45 @@ task-queue mechanism drawing that line for us.
 - Resolved: `search-api` is **not** read-only. A search that misses
   (no data for that route/date yet) also creates an on-demand collection
   request — a row in `agent_requests` with an empty soft-constraint list,
-  the same shape `cmd/email-intake -start` creates, just written directly
-  by `search-api` since both share the one serving store — so email and
-  search-api are two producers into the same table, no separate queue
-  service needed. `search-api` must therefore return a "pending, check
-  back" response on a miss rather than just an empty result.
+  the same shape `cmd/email-intake -start` creates, plus the same
+  `DecisionTrigger` publish onto `internal/kafka`'s `agent-decisions`
+  topic that gets the loop moving — so email and search-api are two
+  producers into the same table and the same topic, no separate queue
+  service needed for either one. `search-api` must therefore return a
+  "pending, check back" response on a miss rather than just an empty
+  result.
 
 ## Components
 
 - **Email intake / `cmd/email-intake`** (SES-inbound handler not yet in
-  the repo; the reconciler and dev CLI are) — in prod, SES inbound
-  receives the request email (initial or a follow-up on an existing
-  thread) and either creates or updates the request's `agent_requests`
-  row. Superseded by "Agent loop: LLM drives the search" below, which is
-  the fuller version of this: the LLM isn't just parsing the request and
-  drafting the reply at the two edges, it's the thing deciding what to
-  search and whether the result is actually good enough, for the whole
-  request, not only at the boundary. Also runs the poll loop that
-  advances every non-finalized request — see "Where this lives in the
-  repo" under that section.
+  the repo; the one-shot dev CLI is) — in prod, SES inbound receives the
+  request email (initial or a follow-up on an existing thread) and either
+  creates a new `agent_requests` row + publishes its first
+  `DecisionTrigger`, or updates an existing row's spec. Superseded by
+  "Agent loop: LLM drives the search" below, which is the fuller version
+  of this: the LLM isn't just parsing the request and drafting the reply
+  at the two edges, it's the thing deciding what to search and whether
+  the result is actually good enough, for the whole request, not only at
+  the boundary. Deliberately *not* where the persistent loop runs — see
+  `cmd/agent-worker` below and "Where this lives in the repo" under that
+  section.
+
+- **`cmd/agent-worker` (Go)** — the persistent process running the agent
+  loop's decision step: consumes `internal/kafka`'s `agent-decisions`
+  topic and calls `internal/agents.Decide` for each request that's ready.
+  New; see "Agent loop" above.
 
 - **`cmd/search-api` (Go)** — normally read-only against the serving
   store (Postgres in prod, SQLite locally — see "Local development"),
   but on a miss (route/date not yet collected) it also creates an
-  `agent_requests` row directly and returns a "pending" response rather
-  than an empty one — the second of two producers into that table.
+  `agent_requests` row and publishes its `DecisionTrigger` directly — the
+  second of two producers into the loop.
 
 - **`cmd/collector` (Go)** — on-demand only, and thin: its `-worker` mode
-  polls `agent_tasks` for pending rows, claims one, and runs the fetch
+  consumes `internal/kafka`'s `search-tasks` topic, runs the fetch, and
+  publishes the resulting `DecisionTrigger` back onto `agent-decisions`
   (see "Collector task dispatch" below). No scheduled/broad scraping
-  mode, no separate queue service — producer (the agent loop) and
-  consumer (`cmd/collector`) meet in the same table, in the same store
-  `search-api` already reads.
+  mode.
 
 - **Spark** (`etl/spark/clean_raw_flights.py`) — periodic batch job
   (not continuous streaming — there's no continuous fare feed to
@@ -339,22 +362,22 @@ task-queue mechanism drawing that line for us.
 
 - **Infra** — Terraform provisions an EC2 fleet on AWS; Ansible
   configures each instance and installs/joins a self-managed
-  Kubernetes cluster on top; every component (email intake, collector,
-  Spark, serving sync, search-api) ships as a Docker image and deploys
-  onto that cluster via Helm charts. Postgres runs as a self-managed
-  workload on that same footprint — the only stateful service this
-  project's request queue and workflow durability need, now that both
-  are rows in it rather than separate Kafka/Temporal clusters (see
-  "Agent loop" and "Collector task dispatch"). S3 and SES inbound
-  are the two deliberate managed-AWS exceptions (mail receiving and
-  object-storage durability aren't worth self-hosting) — everything
-  else is self-managed. `terraform/` is an empty placeholder — that
-  provisioning doesn't exist yet. `ansible/` does have one real role
-  today, `mac_dev` — but it manages a developer's own Mac (Flyway, Go,
-  sqlite3 for local dev), not the EC2 fleet above; see "Local
-  development". Both live as separate top-level directories, not
-  nested under a shared `infra/` (the older AWS CDK stack that used to
-  live there was removed by request — see the top of this doc).
+  Kubernetes cluster on top; every component (email intake, agent-worker,
+  collector, Spark, serving sync, search-api) ships as a Docker image and
+  deploys onto that cluster via Helm charts. Postgres (the serving store
+  and the agent loop's durable state, both rows in it — see "Agent loop")
+  and Kafka (Strimzi — the messaging between `cmd/agent-worker` and
+  `cmd/collector`, see "Collector task dispatch") both run as self-managed
+  workloads on that same footprint. S3 and SES inbound are the two
+  deliberate managed-AWS exceptions (mail receiving and object-storage
+  durability aren't worth self-hosting) — everything else is
+  self-managed. `terraform/` is an empty placeholder — that provisioning
+  doesn't exist yet. `ansible/` does have one real role today, `mac_dev`
+  — but it manages a developer's own Mac (Flyway, Go, sqlite3 for local
+  dev), not the EC2 fleet above; see "Local development". Both live as
+  separate top-level directories, not nested under a shared `infra/` (the
+  older AWS CDK stack that used to live there was removed by request —
+  see the top of this doc).
 
 ## Schema ownership
 
@@ -434,7 +457,7 @@ Docker image.
   user/permission model) — a Postgres-in-prod item, flagged for when
   that exists.
 
-## Collector task dispatch: store-backed poll queue
+## Collector task dispatch: Kafka-chained steps, no workflow engine
 
 How a task actually moves from "an email/search-api miss arrived" to
 "fetched, stored, and the requester notified" — including the case
@@ -442,20 +465,62 @@ where fulfilling one request means fetching several fares (a
 multi-city itinerary, or a worker deciding mid-flight that a request
 needs several sub-fetches).
 
-**Resolved: no message broker, no workflow engine.** Both were
-considered (Kafka/Strimzi + Temporal) and dropped — see `internal/agents`'
-package doc for the full reasoning. Short version: Temporal's task queue
-already gives durable, multi-producer, deduplicated dispatch on its own,
-so a Kafka layer in front of it was duplicate infrastructure; and once
-that's gone, Temporal itself is solving a smaller problem than its own
-operational cost (a second Postgres-backed cluster) justifies at this
-project's scale (bounded by email volume, a days-not-minutes SLA, no
-complex distributed sagas — see "Collection scope" and "Pacing"). What's
-left does the same job with one already-present dependency: the serving
-store.
+**Resolved: Kafka, but no workflow engine, and no message that carries
+full state.** Temporal was considered and dropped — see `internal/agents`'
+package doc for the full reasoning (its core value, high throughput and
+complex sagas, isn't what this project's email-bounded, days-SLA volume
+needs; its cost, a second Postgres-backed cluster, isn't earned back).
+Kafka was *also* dropped for one round of this design (when it would have
+sat in front of Temporal's own task queue — pure duplication) and then
+brought back on its own merits once Temporal was gone: something has to
+turn "a search finished" into "go decide the next step" the instant it
+happens, and a poll loop checking the database on a timer (the version
+that briefly replaced both) only notices up to one interval late and has
+to keep checking even when nothing's happening. Kafka's messages are the
+push-based fix for exactly that, without needing a workflow engine's
+replay machinery to get it: each message is a small, disposable trigger
+("go check request X" / "go run task Y"), never the request/task's actual
+state — the database (`agent_requests`/`agent_tasks`, unchanged from the
+poll-loop version) stays the one place that state lives, so a message
+being lost, redelivered, or arriving twice is harmless by construction.
 
-**`agent_tasks` table** (`internal/catalog`, schema at
-`databases/sqlite/migrations/V004__create_agent_tasks.sql`) is the queue:
+**Two topics, chained** (`internal/kafka`):
+
+```
+agent-decisions {request_id}  --cmd/agent-worker-->  search-tasks {task_id}  --cmd/collector-->  agent-decisions {request_id}  --> ...
+```
+
+- `agent-decisions` carries a `DecisionTrigger{request_id}`. Consumed by
+  `cmd/agent-worker`, which calls `internal/agents.Decide`: loads the row,
+  asks `DecideNextAction`, and either inserts a new `agent_tasks` row +
+  publishes its id onto `search-tasks`, or finalizes and publishes
+  nothing further — that silence is the entire "stop" signal, no separate
+  mechanism needed.
+- `search-tasks` carries a `SearchTaskTrigger{task_id}`. Consumed by
+  `cmd/collector -worker`, which loads the task, runs the real fetch
+  (`internal/routesearch.Search`), saves the result, calls
+  `internal/agents.RecordTaskResult` (folds the outcome into the
+  request's round history, hands it back to `awaiting_decision`), and
+  publishes a fresh `DecisionTrigger` for that request — waking the next
+  round.
+
+Both topics are keyed by the id in the message (`request_id` /
+`task_id`), so every step in one request's chain lands on the same
+partition and processes in order.
+
+**Commit-after-work, not commit-on-read**: both consumers use
+`internal/kafka.Consumer.Next`, which fetches a message but does *not*
+mark it handled until the caller explicitly commits — done only after
+the triggered work (a `Decide` call, a fetch) actually finishes. A worker
+that crashes mid-step leaves its message uncommitted, so it's redelivered
+to the consumer group after a restart/rebalance rather than silently
+dropped — every step this project chains through Kafka is a
+database-backed, redo-safe check, never a one-shot side effect, so
+redelivery is always safe to retry.
+
+`agent_tasks` table (`internal/catalog`, schema at
+`databases/sqlite/migrations/V004__create_agent_tasks.sql`) — unchanged
+in shape from the poll-loop version, just no longer polled:
 
 ```sql
 CREATE TABLE agent_tasks (
@@ -463,53 +528,24 @@ CREATE TABLE agent_tasks (
   request_id   TEXT NOT NULL REFERENCES agent_requests(request_id),
   round        INTEGER NOT NULL,
   params_json  TEXT NOT NULL,      -- origin, destination, dates, max_hours, budget
-  status       TEXT NOT NULL,      -- pending | claimed | done | failed
-  claimed_by   TEXT, claimed_at TEXT,  -- lease, for crash-safe re-claim
-  attempt      INTEGER NOT NULL DEFAULT 0,
+  status       TEXT NOT NULL,      -- pending | done | failed
   result_json  TEXT,
   error        TEXT,
   created_at   TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 ```
 
-**Producers**: the agent loop (`internal/agents.AdvanceRequest`, run by
-`cmd/email-intake -worker`) inserts a row each time it decides to
-dispatch — see "Agent loop" above. `search-api` producing directly into
-`agent_requests` on a miss (see "Collection scope") is the same
-mechanism one layer up, not a second queue.
-
-**`cmd/collector -worker`'s claim loop** (`cmd/collector/worker.go`) polls
-for `status = 'pending'` rows, claims one via a conditional `UPDATE ...
-WHERE task_id = ? AND status = 'pending'` (the affected-row count tells
-it whether it won the race against another claimer — SQLite/Postgres both
-support this without a broker's own dedup), and runs the fetch in its own
-goroutine, capped by a `-concurrency` limit — the store-backed stand-in
-for a Kafka partition's per-consumer throttle and Temporal's per-task-
-queue concurrency cap alike (see "Collection scope"'s per-route
-discussion for the trade-off this accepts: no per-route ordering
-guarantee, just a global concurrency cap plus a cache check before
-scraping).
-
-**Retry / crash recovery**: a task that fails is marked `failed` with the
-error recorded — `internal/agents`' decision step treats that the same as
-"no offers" and retries with widened parameters (bounded by the
-redispatch cap, same as any other round). A task claimed but never
-finished (worker crashed mid-fetch) is caught by a stale-claim sweep
-(`claimed_at` older than a lease timeout → back to `pending`) run at the
-top of every poll tick — the hand-rolled equivalent of a Temporal
-Activity's timeout+retry policy.
-
 **Multi-leg ("complex") requests need no fan-out at the task layer at
 all**: `internal/routesearch.Search` already runs the whole hub-search
 algorithm (below) as one in-process Go function with its own paced,
 sequential scrapes — it was never a distributed fan-out to begin with, so
 one `agent_tasks` row per request (not per leg) is already the right
-granularity. What Temporal would have added here — durable checkpointing
-mid-search — isn't needed either: routesearch's own audit trail
-(`route_search_plans`, "Audit trail" below) is written incrementally, and
-a crash mid-search just means the task is retried from scratch on the
-next round, an acceptable cost at this project's query-budget scale (a
-handful to dozens of scrapes per request, not hundreds).
+granularity. Durable checkpointing mid-search isn't needed either:
+routesearch's own audit trail (`route_search_plans`, "Audit trail" below)
+is written incrementally, and a crash mid-search just means the task is
+retried from scratch on the next round, an acceptable cost at this
+project's query-budget scale (a handful to dozens of scrapes per request,
+not hundreds).
 
 **Notification on completion**: still open (unchanged from before) —
 `search-api` querying `agent_requests.status`/`finalized_by` by
@@ -826,11 +862,15 @@ no durable timer primitive needed for this, just a row:
 2. Set `agent_requests.status = 'deferred'`, `deferred_until` = that wake
    time, and stop — same "state lives in the row" property as everything
    else in "Agent loop"/"Collector task dispatch": nothing needs to stay
-   running for the months in between. A sweep at the top of
-   `cmd/email-intake -worker`'s poll tick (`deferred_until <= now` → back
-   to `awaiting_decision`) is all "waking" is; a poll interval measured in
-   seconds costs nothing extra spent checking a timestamp that won't be
-   true for months.
+   running for the months in between. This is the one genuinely
+   time-based check in the whole design — "has enough calendar time
+   passed" isn't something a Kafka message can trigger, since nothing
+   *happens* to publish one. A periodic sweep (`deferred_until <= now` →
+   back to `awaiting_decision` + publish a fresh `DecisionTrigger`) is
+   what "waking" actually is; a daily Airflow-scheduled task (`etl/airflow`
+   already runs on a schedule for unrelated reasons) is a natural fit
+   rather than a bespoke long-lived process, since checking a date needs
+   nothing faster than daily.
 3. On waking, run the search normally. If it's still empty (a carrier
    loaded a little later than the horizon constant assumed), retry on a
    short backoff (e.g. daily) up to a capped number of attempts or until
@@ -857,11 +897,11 @@ completed-but-empty search, no separate status string needed the way a
 
 **Not yet implemented**: `DecideNextAction` (`internal/agents/decide.go`)
 is still the deterministic stub from "Agent loop" and never returns
-`ActionDefer`, and the wake sweep described above (`requeueDeferredRequests`)
-isn't written yet either — this section describes the target behavior,
-which the store-backed design already supports without needing anything
-new (unlike the Temporal-dependent version this replaced), but the code
-path itself is still open work.
+`ActionDefer`, and the wake sweep described above isn't written yet
+either — this section describes the target behavior, which the
+row-plus-Kafka design already supports without needing anything new
+(unlike the Temporal-dependent version this replaced), but the code path
+itself is still open work.
 
 **Open decisions**:
 - **`BOOKING_HORIZON_DAYS`**: not asked — defaulting to **330 days**
@@ -991,14 +1031,16 @@ doc — say so if you'd rather change them):
 
 **Resolved:** cloud = AWS EC2, self-managed compute; IaC = Terraform
 (provision) + Ansible (configure) + Docker + Kubernetes + Helm
-(deploy); object storage = S3; inbound email = SES; request queue =
-the serving store's own `agent_requests`/`agent_tasks` tables, not a
-separate Kafka/Strimzi cluster; response channel = both email reply and
-search-api; search-api triggers collection on a miss, not just email;
-durability for the agent loop and fetch retries = a store-backed poll
-loop (see "Collector task dispatch"), not Temporal or a hand-rolled
-Kafka-based tracking table — both were considered and dropped as more
-infrastructure than this project's scale justifies.
+(deploy); object storage = S3; inbound email = SES; response channel =
+both email reply and search-api; search-api triggers collection on a
+miss, not just email; durability for the agent loop and fetch retries =
+the serving store's `agent_requests`/`agent_tasks` tables (state) plus
+Kafka/Strimzi (the trigger between steps — see "Collector task
+dispatch"), not Temporal — considered and dropped as more infrastructure
+than this project's scale justifies (see `internal/agents`' package
+doc), while Kafka earns its place once it's the thing actually pushing
+work instead of sitting redundantly in front of a workflow engine's own
+task queue.
 
 - **Kubernetes distro**: not asked — defaulting to **k3s** (lighter
   control-plane footprint than kubeadm/RKE2, well-suited to a
@@ -1021,7 +1063,7 @@ infrastructure than this project's scale justifies.
   arm64 (Graviton) rather than x86_64, it's the same architecture as
   local M1 builds, not just "also native" — removes a whole class of
   arch-mismatch bugs, and Graviton is generally cheaper too. Nothing
-  in the stack (Spark, Delta Lake, dbt, Go, Postgres) blocks arm64.
+  in the stack (Kafka, Spark, Delta Lake, dbt, Go, Postgres) blocks arm64.
   Defaulting to **arm64/Graviton** for this reason; say so if
   x86_64 is actually needed for something not yet in the design.
 
@@ -1050,14 +1092,21 @@ about what works in prod.
   Spark-on-Kubernetes operator runs inside the local cluster too
   (not `local[*]` mode), affordable here since data volumes are tiny
   (bounded by test-fixture requests, per "Collection scope").
+- **Kafka**: same as prod, no substitution — Strimzi, single-broker
+  KRaft mode (no ZooKeeper), deployed into the local cluster with lower
+  resource requests/limits in `values-local.yaml`. Outside the cluster
+  (a bare Go dev loop, not k3d), a plain local Kafka install works too —
+  verified directly: `brew install kafka` (Kafka 4.x ships KRaft mode
+  built in, `kafka-server-start`) plus `make kafka-topics` to create
+  `agent-decisions`/`search-tasks` once.
 - **Email intake**: SES inbound can't run locally — it's an
   AWS-managed delivery hop, not something to emulate. Local dev uses
   `cmd/email-intake -start`/`-signal` (built) as the fixture-driven
   stand-in — same effect a raw-email-fixture HTTP endpoint would have,
-  writing the same `agent_requests` row real SES-triggered parsing code
-  would. This tests everything downstream of "an email arrived"; it
-  doesn't test AWS's delivery of the email itself, which isn't testable
-  locally regardless.
+  writing the same `agent_requests` row (and publishing the same
+  `DecisionTrigger`) real SES-triggered parsing code would. This tests
+  everything downstream of "an email arrived"; it doesn't test AWS's
+  delivery of the email itself, which isn't testable locally regardless.
 - **Collector — provider**: resolved — a mock/stub provider for local
   dev and any automated tests, returning canned fares for known test
   routes, selected via an env var (e.g. `PROVIDER=mock`). Keeps
@@ -1071,20 +1120,23 @@ about what works in prod.
   locally.
 - **End-to-end test flow** (should be one scriptable command, not just
   manual steps, so it also runs in CI):
-  1. Bring up the cluster + stack: MinIO, SQLite-backed
-     search-api/collector/email-intake, Spark operator (Helm). No
-     separate queue/workflow-engine component to bring up — `cmd/collector
-     -worker` and `cmd/email-intake -worker` just need the same SQLite
-     file the rest of local dev already uses.
+  1. Bring up the cluster + stack: Kafka, MinIO, SQLite-backed
+     search-api/collector/agent-worker/email-intake, Spark operator
+     (Helm). No workflow engine to bring up — `cmd/agent-worker` and
+     `cmd/collector -worker` just need the same SQLite file the rest of
+     local dev already uses, plus Kafka reachable.
   2. Run `cmd/email-intake -start` with a sample request (exercises the
      email path), or query `search-api` for a route that's a known miss
      (exercises the search-triggered path).
-  3. Watch it flow: `agent_requests`/`agent_tasks` rows → `cmd/collector
-     -worker` claims and runs the task (mock provider) → MinIO raw zone →
-     Spark batch → Delta Lake (on MinIO) → dbt gold → sync → SQLite.
+  3. Watch it flow: `agent_requests` row + `DecisionTrigger` →
+     `cmd/agent-worker` dispatches a task → `cmd/collector -worker` runs
+     it (mock provider) → MinIO raw zone → Spark batch → Delta Lake (on
+     MinIO) → dbt gold → sync → SQLite; meanwhile the result also flows
+     back through `agent-decisions` to finalize the request.
   4. Query `search-api` for that route/date and assert the result.
-- **Sizing**: a single k3d node running the Spark operator + MinIO + a
-  handful of small Go services should fit an M1 MacBook's unified memory
-  at low resource requests, comfortably lighter than the Kafka+Temporal
-  version this replaced — flagging as an assumption to revisit if it
-  turns out too heavy, not a blocker.
+- **Sizing**: a single k3d node running Kafka (1 broker) + the Spark
+  operator + MinIO + a handful of small Go services should fit an M1
+  MacBook's unified memory at low resource requests — lighter than the
+  Kafka+Temporal version considered earlier (no second Postgres-backed
+  cluster for Temporal's own persistence) — flagging as an assumption to
+  revisit if it turns out too heavy, not a blocker.

@@ -24,16 +24,16 @@ type AgentRequestRow struct {
 }
 
 // AgentTaskRow is one agent_tasks row — the unit cmd/collector -worker
-// claims and runs.
+// runs, one task per Kafka search-tasks message (see DESIGN.md "Collector
+// task dispatch"). No claim/lease columns: Kafka's own consumer-group
+// delivery already guarantees a task is only in-flight on one worker at a
+// time, and redelivers it if that worker crashes mid-task.
 type AgentTaskRow struct {
 	TaskID     string
 	RequestID  string
 	Round      int
 	ParamsJSON string
 	Status     string
-	ClaimedBy  string
-	ClaimedAt  sql.NullString
-	Attempt    int
 	ResultJSON sql.NullString
 	Error      sql.NullString
 	CreatedAt  string
@@ -139,60 +139,23 @@ func (s *SQLite) CreateAgentTask(ctx context.Context, taskID, requestID string, 
 	return nil
 }
 
-// GetAgentTask reads one task row by id — how the reconciler checks
-// whether the round it's waiting on has finished.
+// GetAgentTask reads one task row by id — how cmd/collector loads the
+// task a search-tasks Kafka message pointed at, and how
+// internal/agents.RecordTaskResult reads it back afterward.
 func (s *SQLite) GetAgentTask(ctx context.Context, taskID string) (AgentTaskRow, error) {
 	row := s.db.QueryRowContext(ctx, `
-		SELECT task_id, request_id, round, params_json, status, claimed_by, claimed_at, attempt, result_json, error, created_at, updated_at
+		SELECT task_id, request_id, round, params_json, status, result_json, error, created_at, updated_at
 		FROM agent_tasks WHERE task_id = ?`, taskID)
 	var t AgentTaskRow
 	err := row.Scan(&t.TaskID, &t.RequestID, &t.Round, &t.ParamsJSON, &t.Status,
-		&t.ClaimedBy, &t.ClaimedAt, &t.Attempt, &t.ResultJSON, &t.Error, &t.CreatedAt, &t.UpdatedAt)
+		&t.ResultJSON, &t.Error, &t.CreatedAt, &t.UpdatedAt)
 	if err != nil {
 		return AgentTaskRow{}, fmt.Errorf("catalog: loading agent task %s: %w", taskID, err)
 	}
 	return t, nil
 }
 
-// ClaimPendingAgentTask atomically claims one pending task for workerID —
-// the lease that stands in for a Temporal Activity's own dispatch. Returns
-// ok=false when there's nothing to claim right now, not an error.
-// SQLite has no "UPDATE ... LIMIT 1 RETURNING" it can rely on across
-// concurrent callers, so this selects a candidate then re-checks the
-// UPDATE's affected-row count to detect (and just skip, not error on) a
-// lost race against another claimer.
-func (s *SQLite) ClaimPendingAgentTask(ctx context.Context, workerID string) (AgentTaskRow, bool, error) {
-	var taskID string
-	err := s.db.QueryRowContext(ctx, `
-		SELECT task_id FROM agent_tasks WHERE status = 'pending' ORDER BY created_at LIMIT 1`).Scan(&taskID)
-	if err == sql.ErrNoRows {
-		return AgentTaskRow{}, false, nil
-	}
-	if err != nil {
-		return AgentTaskRow{}, false, fmt.Errorf("catalog: finding pending agent task: %w", err)
-	}
-
-	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE agent_tasks SET status = 'claimed', claimed_by = ?, claimed_at = ?, attempt = attempt + 1, updated_at = ?
-		WHERE task_id = ? AND status = 'pending'`,
-		workerID, now, now, taskID)
-	if err != nil {
-		return AgentTaskRow{}, false, fmt.Errorf("catalog: claiming agent task %s: %w", taskID, err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return AgentTaskRow{}, false, fmt.Errorf("catalog: checking claim result for %s: %w", taskID, err)
-	}
-	if n == 0 {
-		return AgentTaskRow{}, false, nil // lost the race to another claimer; caller just tries again next tick
-	}
-
-	task, err := s.GetAgentTask(ctx, taskID)
-	return task, err == nil, err
-}
-
-// SaveAgentTaskResult records a claimed task's outcome.
+// SaveAgentTaskResult records a task's outcome.
 func (s *SQLite) SaveAgentTaskResult(ctx context.Context, taskID, status string, resultJSON []byte, errMsg string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	res, err := s.db.ExecContext(ctx, `
@@ -202,22 +165,6 @@ func (s *SQLite) SaveAgentTaskResult(ctx context.Context, taskID, status string,
 		return fmt.Errorf("catalog: saving agent task result: %w", err)
 	}
 	return mustAffectOne(res, "agent task", taskID)
-}
-
-// ReapStaleAgentTaskClaims resets any task still "claimed" past
-// leaseTimeout back to "pending" — crash recovery for a worker that died
-// mid-task, the same job a Temporal Activity's own timeout+retry gives
-// for free.
-func (s *SQLite) ReapStaleAgentTaskClaims(ctx context.Context, leaseTimeout time.Duration) (int, error) {
-	cutoff := time.Now().UTC().Add(-leaseTimeout).Format(time.RFC3339)
-	res, err := s.db.ExecContext(ctx, `
-		UPDATE agent_tasks SET status = 'pending', claimed_by = '', claimed_at = NULL
-		WHERE status = 'claimed' AND claimed_at < ?`, cutoff)
-	if err != nil {
-		return 0, fmt.Errorf("catalog: reaping stale agent task claims: %w", err)
-	}
-	n, err := res.RowsAffected()
-	return int(n), err
 }
 
 func mustAffectOne(res sql.Result, kind, id string) error {

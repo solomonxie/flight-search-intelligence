@@ -1,4 +1,4 @@
-.PHONY: build db-init run-collector run-search-api run-collector-worker run-email-intake-worker test
+.PHONY: build db-init run-collector run-search-api run-collector-worker run-agent-worker kafka-topics test
 
 build:
 	go build ./...
@@ -12,15 +12,21 @@ run-collector:
 run-search-api:
 	go run ./cmd/search-api
 
-# Agent loop (see DESIGN.md "Agent loop" / "Collector task dispatch") —
-# store-backed poll workers, no message broker or workflow engine. Run
-# both alongside each other for the loop to actually advance requests:
-# email-intake decides/dispatches, collector claims/runs the fetches.
+# Agent loop (see DESIGN.md "Agent loop" and internal/kafka's package doc)
+# — each step is a Kafka message, not a poll loop. Needs a local broker
+# running first (`kafka-server-start`, or any Kafka-API-compatible
+# broker) and both topics created once (`make kafka-topics`). Run both
+# workers alongside each other for the loop to actually advance requests;
+# create a request with `go run ./cmd/email-intake -start ...`.
 run-collector-worker:
 	go run ./cmd/collector -worker
 
-run-email-intake-worker:
-	go run ./cmd/email-intake -worker
+run-agent-worker:
+	go run ./cmd/agent-worker
+
+kafka-topics:
+	kafka-topics --bootstrap-server localhost:9092 --create --if-not-exists --topic agent-decisions --partitions 3 --replication-factor 1
+	kafka-topics --bootstrap-server localhost:9092 --create --if-not-exists --topic search-tasks --partitions 3 --replication-factor 1
 
 test:
 	go test ./...

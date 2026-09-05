@@ -15,7 +15,11 @@ The important trick: instead of keeping track of "where we are" in the
 computer's memory while it works, it writes down its progress as a row
 in the database after every single step. That means if the program
 crashes or gets restarted, nothing is lost — it just reads its own notes
-and picks up exactly where it left off.
+and picks up exactly where it left off. And it doesn't sit there
+checking "is it my turn yet?" on a timer either — a step only runs
+because a small Kafka message said "check this now" (see `kafka/`
+below), pushed by whatever just happened (a search finished, an email
+arrived).
 
 - **`spec.go`** — the basic "form" every request fills out: where the
   traveler wants to go, when, budget, plus any special requests typed in
@@ -29,11 +33,12 @@ and picks up exactly where it left off.
   actually does today: a simple rule — try the search once; if it found
   any flight, call it done; if not, loosen the requirements a bit and try
   again, up to 3 times before giving up.
-- **`reconcile.go`** — the part that actually runs, one step at a time.
-  Each time it's called for one traveler's request, it checks the notes
-  so far and does exactly one small thing: either "ask the decision-maker
-  what to do and kick off a new search," or "check whether the last
-  search finished, and if so, write down what it found."
+- **`reconcile.go`** — the two moments this package actually does
+  something. `Decide` runs when a request is ready for a decision: asks
+  the decision-maker what to do, then either starts a new search job or
+  writes the final answer down. `RecordTaskResult` runs right after a
+  search job finishes: writes down what it found and hands the request
+  back to "ready for a decision" so `Decide` runs again next.
 
 ## `catalog/`
 
@@ -49,9 +54,9 @@ process (see `databases/README.md`).
   up the cheapest price seen before for a route, and save a full record
   of one search (what was tried, what was found).
 - **`agent.go`** — the two tables the "brain" above depends on: one row
-  per traveler request, one row per individual search job. Includes the
-  fiddly bit of code that lets several workers grab search jobs at the
-  same time without two of them accidentally grabbing the same job.
+  per traveler request, one row per individual search job. (Making sure
+  two workers don't grab the same job at the same time is handled by
+  Kafka now, not here — see `kafka/` below.)
 
 ## `common/`
 
@@ -80,6 +85,28 @@ page looks, this may need fixing.
   request packed into a specific compact format. This file builds that
   by hand, rather than pulling in a big external library just for this
   one small piece.
+
+## `kafka/`
+
+The messaging glue between the two background workers
+(`cmd/agent-worker` and `cmd/collector`). Instead of either one
+repeatedly asking "is there anything for me to do yet?", each hands the
+next one a tiny note the moment there's something to do — like a sticky
+note passed to a coworker instead of them walking over to check your
+desk every few seconds. The note never carries the actual work, just an
+ID ("go look at request X" / "go run task Y") — the database is still
+where the real information lives.
+
+- **`kafka.go`** — the only file. Defines the two message channels
+  ("topics"): one for "a request is ready for a decision," one for "a
+  search job is ready to run." A worker that decides there's nothing
+  more to do for a request just doesn't send a next note — that silence
+  is what makes the loop stop. Also handles a subtle but important
+  detail: a note is only marked "handled" *after* the work it triggered
+  actually finishes, not the moment it's picked up — so if a worker
+  crashes partway through, the note comes back and someone else (or the
+  same worker, restarted) tries again, instead of the step silently
+  never happening.
 
 ## `openflights/`
 

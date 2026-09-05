@@ -3,13 +3,12 @@
 //
 //   - Default: direct-run CLI, just
 //     `go run ./cmd/collector -origin SFO -destination JFK -date 2026-12-05`
-//     against real (live) fare data, no Kafka/queue involved — step one,
+//     against real (live) fare data, no Kafka involved — step one,
 //     proving the provider fetch itself works.
-//   - `-worker`: polls internal/catalog's agent_tasks table (worker.go)
-//     for tasks internal/agents' reconciler (cmd/email-intake -worker)
-//     dispatched, and runs them — see DESIGN.md "Agent loop" and
-//     internal/agents' package doc for why this is a plain poll loop
-//     against the store rather than a workflow-engine worker.
+//   - `-worker`: consumes internal/kafka's search-tasks topic (worker.go)
+//     for tasks cmd/agent-worker dispatched, runs them, and pushes the
+//     result back onto agent-decisions so the next round can be decided.
+//     See DESIGN.md "Agent loop" and internal/kafka's package doc.
 package main
 
 import (
@@ -43,14 +42,14 @@ func run() error {
 	adults := flag.Int("adults", 1, "number of adult passengers")
 	outDir := flag.String("out-dir", "data/raw", "directory to write the raw HTML result into")
 	dbPath := flag.String("db", "data/flight_search.db", "SQLite serving-store path to write parsed offers into")
-	workerMode := flag.Bool("worker", false, "poll agent_tasks and run dispatched searches instead of the direct-run CLI (see DESIGN.md \"Agent loop\")")
-	pollInterval := flag.Duration("poll-interval", 15*time.Second, "how often to check for pending tasks when idle (worker mode only)")
+	workerMode := flag.Bool("worker", false, "consume search-tasks from Kafka and run dispatched searches instead of the direct-run CLI (see DESIGN.md \"Agent loop\")")
+	kafkaBrokers := flag.String("kafka-brokers", "localhost:9092", "comma-separated Kafka broker addresses (worker mode only)")
 	concurrency := flag.Int("concurrency", 3, "max tasks to run at once (worker mode only)")
 	openflightsDir := flag.String("openflights-dir", "data/openflights", "cache dir for the OpenFlights airports/routes dataset (worker mode only)")
 	flag.Parse()
 
 	if *workerMode {
-		return runWorker(*dbPath, *openflightsDir, *pollInterval, *concurrency)
+		return runWorker(*dbPath, *openflightsDir, strings.Split(*kafkaBrokers, ","), *concurrency)
 	}
 
 	if *origin == "" || *destination == "" || *date == "" {
@@ -98,7 +97,8 @@ func run() error {
 // saveOffers persists parsed offers as etl/dbt's raw.flight_prices shape
 // (see catalog.FlightPrice) into the local SQLite serving-store stand-in —
 // skipping the Spark/Delta Lake/dbt gold pipeline DESIGN.md targets, for
-// now, the same way this collector already skips Kafka/Temporal/S3.
+// now. Used by the direct-run CLI path only; -worker mode's own save
+// happens in activities.go via fetchFare instead.
 func saveOffers(dbPath, origin, destination, departDate, returnDate string, offers []googleflights.Offer) error {
 	db, err := catalog.Open(dbPath)
 	if err != nil {
@@ -126,7 +126,7 @@ func saveOffers(dbPath, origin, destination, departDate, returnDate string, offe
 
 // writeRaw drops the untouched HTML response into outDir, named so repeat
 // runs for the same route/date don't collide. Stands in for "the S3 raw
-// zone" (see DESIGN.md) until the collector is wired to Kafka/Temporal/S3.
+// zone" (see DESIGN.md) until the collector is wired to real S3.
 func writeRaw(outDir, origin, destination, date string, raw []byte) (string, error) {
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return "", err

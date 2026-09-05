@@ -1,14 +1,18 @@
-// Command email-intake is DESIGN.md "Where this lives in the repo"'s
-// reconciler for internal/agents' agent loop, plus a dev-only CLI standing
-// in for SES inbound (DESIGN.md "Local development": "Local dev exposes a
-// small HTTP endpoint/CLI that accepts a raw email fixture... this tests
-// everything downstream of 'an email arrived'"). No workflow engine here —
-// see internal/agents' package doc for why. Three modes:
+// Command email-intake is a dev-only, one-shot CLI standing in for SES
+// inbound until that's actually built (DESIGN.md "Local development").
+// Two modes, and — unlike an earlier version of this binary — no
+// background loop: each run does one thing and exits, the same way a
+// single inbound email would trigger one action, not a persistent
+// process. See cmd/agent-worker for where the persistent, always-running
+// half of the agent loop actually lives now.
 //
-//   - -worker: poll agent_requests and advance whichever ones are ready.
-//   - -start: create a new request (stands in for an initial request email).
+//   - -start: create a new request (stands in for an initial request
+//     email) and publish the first DecisionTrigger (internal/kafka) so
+//     cmd/agent-worker picks it up.
 //   - -signal: append a soft constraint to an existing request (stands in
-//     for a reply email on an existing thread).
+//     for a reply email on an existing thread) — just a database update,
+//     no message needed; whatever runs next for that request reads the
+//     spec fresh.
 package main
 
 import (
@@ -22,6 +26,7 @@ import (
 	"flight-search-intelligence/internal/agents"
 	"flight-search-intelligence/internal/catalog"
 	"flight-search-intelligence/internal/common"
+	"flight-search-intelligence/internal/kafka"
 )
 
 func main() {
@@ -34,11 +39,10 @@ func main() {
 func run() error {
 	_ = common.Load(".env")
 
-	workerMode := flag.Bool("worker", false, "poll agent_requests and advance ready ones")
 	start := flag.Bool("start", false, "create a new request (stands in for an initial request email)")
 	signal := flag.Bool("signal", false, "append a soft constraint to an existing request (stands in for a reply email)")
 	dbPath := flag.String("db", "data/flight_search.db", "SQLite store path")
-	pollInterval := flag.Duration("poll-interval", 15*time.Second, "how often to check for ready requests (-worker only)")
+	kafkaBrokers := flag.String("kafka-brokers", "localhost:9092", "comma-separated Kafka broker addresses (-start only)")
 
 	origin := flag.String("origin", "", "origin IATA airport code (-start)")
 	destination := flag.String("destination", "", "destination IATA airport code (-start)")
@@ -54,8 +58,6 @@ func run() error {
 	flag.Parse()
 
 	switch {
-	case *workerMode:
-		return runWorker(*dbPath, *pollInterval)
 	case *start:
 		var soft []string
 		for _, s := range strings.Split(*softConstraintsCSV, ",") {
@@ -63,46 +65,16 @@ func run() error {
 				soft = append(soft, s)
 			}
 		}
-		return startRequest(*dbPath, *origin, *destination, *date, *returnDate, *maxHours, *budget, soft, *wait, *pollInterval)
+		return startRequest(*dbPath, strings.Split(*kafkaBrokers, ","), *origin, *destination, *date, *returnDate, *maxHours, *budget, soft, *wait)
 	case *signal:
 		return sendFollowUp(*dbPath, *requestID, *text)
 	default:
 		flag.Usage()
-		return fmt.Errorf("one of -worker, -start, or -signal is required")
+		return fmt.Errorf("one of -start or -signal is required")
 	}
 }
 
-// runWorker is the reconciler poll loop: advance every non-finalized
-// request that's actually ready to move, then sleep. See internal/agents'
-// package doc for why this — not a workflow engine — is the whole "agent
-// loop" runtime.
-func runWorker(dbPath string, pollInterval time.Duration) error {
-	db, err := catalog.Open(dbPath)
-	if err != nil {
-		return fmt.Errorf("opening store: %w", err)
-	}
-	defer db.Close()
-
-	fmt.Printf("email-intake worker: polling %s every %s\n", dbPath, pollInterval)
-	ctx := context.Background()
-
-	for {
-		rows, err := db.ListActiveAgentRequests(ctx)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "email-intake: listing active requests:", err)
-			time.Sleep(pollInterval)
-			continue
-		}
-		for _, row := range rows {
-			if err := agents.AdvanceRequest(ctx, db, row); err != nil {
-				fmt.Fprintf(os.Stderr, "email-intake: advancing %s: %v\n", row.RequestID, err)
-			}
-		}
-		time.Sleep(pollInterval)
-	}
-}
-
-func startRequest(dbPath, origin, destination, date, returnDate string, maxHours float64, budget int, soft []string, wait bool, pollInterval time.Duration) error {
+func startRequest(dbPath string, brokers []string, origin, destination, date, returnDate string, maxHours float64, budget int, soft []string, wait bool) error {
 	if origin == "" || destination == "" || date == "" {
 		return fmt.Errorf("-origin, -destination, and -date are required with -start")
 	}
@@ -124,14 +96,20 @@ func startRequest(dbPath, origin, destination, date, returnDate string, maxHours
 		return fmt.Errorf("creating request: %w", err)
 	}
 
-	fmt.Printf("Created request %s. Run `go run ./cmd/email-intake -worker` (if not already running) to advance it.\n", requestID)
+	producer := kafka.NewProducer(brokers, kafka.TopicAgentDecisions)
+	defer producer.Close()
+	if err := producer.Send(ctx, requestID, kafka.DecisionTrigger{RequestID: requestID}); err != nil {
+		return fmt.Errorf("publishing initial decision trigger: %w", err)
+	}
+
+	fmt.Printf("Created request %s and published its first decision trigger.\n", requestID)
 	fmt.Printf("Send a follow-up with:\n  go run ./cmd/email-intake -signal -request-id %s -text \"...\"\n", requestID)
 
 	if !wait {
 		return nil
 	}
 
-	fmt.Println("\n-wait set: polling for the outcome (dev convenience only — real SES intake would not block here)...")
+	fmt.Println("\n-wait set: polling for the outcome (dev convenience only — real SES intake would not block)...")
 	for {
 		row, err := db.LoadAgentRequest(ctx, requestID)
 		if err != nil {
@@ -141,7 +119,7 @@ func startRequest(dbPath, origin, destination, date, returnDate string, maxHours
 			fmt.Printf("\nFinalized (%s):\n\n%s\n", row.FinalizedBy.String, row.EmailBody.String)
 			return nil
 		}
-		time.Sleep(pollInterval)
+		time.Sleep(2 * time.Second)
 	}
 }
 
