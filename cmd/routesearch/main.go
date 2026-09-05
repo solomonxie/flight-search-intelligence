@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"flight-search-intelligence/internal/catalog"
@@ -57,6 +58,10 @@ func run() error {
 	tripLengthDays := flag.Int("trip-length-days", 0, "flexible round trip: fixed trip length; defaults to (-return-date minus -date) if both given")
 	dryRun := flag.Bool("dry-run", false, "resolve airports + rank candidate hubs only, no scraping (step 1 of the algorithm; overrides every other mode below)")
 	scanDates := flag.Bool("scan-dates", false, "with -date-window-days, check the fare for each date in the window and stop — no connecting-hub search")
+	availableFrom := flag.String("available-from", "", "flexible-date scan: reject a chosen date whose depart/return falls before this YYYY-MM-DD (e.g. limited PTO)")
+	availableUntil := flag.String("available-until", "", "flexible-date scan: reject a chosen date whose depart/return falls after this YYYY-MM-DD")
+	excludeWeekdays := flag.String("exclude-weekdays", "", "flexible-date scan: comma-separated weekday names (e.g. Monday,Tuesday) to exclude as a chosen depart date")
+	blackoutDates := flag.String("blackout-dates", "", "flexible-date scan: comma-separated YYYY-MM-DD dates to exclude as a chosen depart/return date (e.g. holidays)")
 	flag.Parse()
 
 	if *origin == "" || *destination == "" || *date == "" {
@@ -117,9 +122,15 @@ func run() error {
 			}
 			tripLen = int(d2.Sub(d1).Hours() / 24)
 		}
+		weekdays, err := parseWeekdays(*excludeWeekdays)
+		if err != nil {
+			return err
+		}
 		plan, err := routesearch.SearchFlexible(ctx, deps, routesearch.FlexibleParams{
 			Base: base, RoundTrip: *returnDate != "", TripLengthDays: tripLen,
 			WindowDays: *dateWindowDays, StepDays: *dateStepDays, ScanOnly: *scanDates,
+			AvailableFrom: *availableFrom, AvailableUntil: *availableUntil,
+			ExcludeWeekdays: weekdays, BlackoutDates: splitNonEmpty(*blackoutDates),
 		})
 		if err != nil {
 			return err
@@ -142,4 +153,37 @@ func run() error {
 	}
 
 	return nil
+}
+
+// splitNonEmpty splits a comma-separated flag value, dropping empty
+// entries (so "" yields nil, not [""]).
+func splitNonEmpty(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+// parseWeekdays parses -exclude-weekdays' comma-separated weekday names
+// (e.g. "Monday,Tuesday") into time.Weekday values.
+func parseWeekdays(s string) ([]time.Weekday, error) {
+	names := map[string]time.Weekday{
+		"sunday": time.Sunday, "monday": time.Monday, "tuesday": time.Tuesday,
+		"wednesday": time.Wednesday, "thursday": time.Thursday, "friday": time.Friday, "saturday": time.Saturday,
+	}
+	var out []time.Weekday
+	for _, part := range splitNonEmpty(s) {
+		wd, ok := names[strings.ToLower(part)]
+		if !ok {
+			return nil, fmt.Errorf("-exclude-weekdays: unrecognized weekday %q", part)
+		}
+		out = append(out, wd)
+	}
+	return out, nil
 }

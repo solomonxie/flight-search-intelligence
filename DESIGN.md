@@ -815,6 +815,16 @@ questions the audit trail exists to answer.
   outright winner) rather than running hub search on several near-tied
   dates. Say so if you want hub search hedged across, e.g., the top 3.
 
+**Eligibility constraints on the Phase A winner** (`FlexibleParams`):
+`AvailableFrom`/`AvailableUntil` (a real-world travel window, e.g.
+limited PTO — narrower than the scan window, which only controls what
+gets *priced*), `ExcludeWeekdays`, `BlackoutDates` (holidays, etc). Every
+scanned date is still priced and shown; these only narrow which priced
+date `cheapestDateScanEntry` may pick — pure price-argmin otherwise.
+LLM-assisted re-ranking of near-tied candidates (day-of-week/holiday
+judgment calls a hard constraint can't express) is a deferred idea, not
+built.
+
 **Deferred idea, not designed yet: land near the destination, cover the
 last leg by ground.** E.g. flying into Tianjin (TSN) and taking the
 intercity train into Beijing, rather than flying all the way into PEK.

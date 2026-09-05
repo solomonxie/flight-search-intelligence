@@ -17,6 +17,11 @@ type DateScanEntry struct {
 	PriceUSD   float64 `json:"price_usd,omitempty"`
 	Queried    bool    `json:"queried"`
 	Reason     string  `json:"reason,omitempty"`
+	// Excluded, when non-empty, says why this entry — priced fine — is
+	// ineligible to be the Phase A winner (see FlexibleParams' Available*/
+	// Exclude*/Blackout* constraints). It's still shown/priced for
+	// context; cheapestDateScanEntry just skips it.
+	Excluded string `json:"excluded,omitempty"`
 }
 
 // FlexibleParams is a flexible-date request: a target date (Base.
@@ -29,6 +34,16 @@ type FlexibleParams struct {
 	WindowDays     int  // scan [center-WindowDays, center+WindowDays]
 	StepDays       int  // sample every StepDays within the window; 1 = every day
 	ScanOnly       bool // stop after Phase A (the date scan); skip Phase B's hub search
+
+	// Eligibility constraints on which scanned date can actually be
+	// picked as the winner — deliberately separate from WindowDays/
+	// StepDays, which only control what gets *priced*. Every date in the
+	// window is still scanned and shown either way; these just narrow
+	// which of the priced dates cheapestDateScanEntry may choose.
+	AvailableFrom   string         // YYYY-MM-DD; depart/return must both be >= this, if set ("I'm not free before...")
+	AvailableUntil  string         // YYYY-MM-DD; depart/return must both be <= this, if set ("...or after")
+	ExcludeWeekdays []time.Weekday // depart dates falling on these weekdays are ineligible
+	BlackoutDates   []string       // YYYY-MM-DD; a depart or return date matching one is ineligible
 }
 
 // FlexiblePlan is the audit trail for a flexible-date search: the full
@@ -70,6 +85,7 @@ func SearchFlexible(ctx context.Context, deps Deps, p FlexibleParams) (*Flexible
 	log.Info("phase A: date scan", "window_days", p.WindowDays, "step_days", step, "round_trip", p.RoundTrip)
 	for offset := -p.WindowDays; offset <= p.WindowDays; offset += step {
 		entry, live := scanOneDate(ctx, deps, p, center, offset)
+		entry.Excluded = exclusionReason(p, entry)
 		plan.DateScan = append(plan.DateScan, entry)
 		log.Info("date scan point", "depart", entry.DepartDate, "return", entry.ReturnDate,
 			"price_usd", entry.PriceUSD, "reason", entry.Reason, "live", live)
@@ -83,7 +99,11 @@ func SearchFlexible(ctx context.Context, deps Deps, p FlexibleParams) (*Flexible
 
 	best := cheapestDateScanEntry(plan.DateScan)
 	if best == nil {
-		plan.Status = "error: no feasible date in window"
+		reason := "no feasible date in window"
+		if anyPricedButExcluded(plan.DateScan) {
+			reason = "every priced date is excluded by AvailableFrom/AvailableUntil/ExcludeWeekdays/BlackoutDates"
+		}
+		plan.Status = "error: " + reason
 		_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
 		return plan, fmt.Errorf("routesearch: %s", plan.Status)
 	}
@@ -169,4 +189,48 @@ func scanOneDate(ctx context.Context, deps Deps, p FlexibleParams, center time.T
 		entry.Reason = "no feasible offer"
 	}
 	return entry, live
+}
+
+// exclusionReason reports why entry, if priced, may not be picked as the
+// Phase A winner — empty if it's fully eligible. Checked independently of
+// PriceUSD/Reason so an excluded date still shows its price for context
+// (e.g. "yes it's $50 cheaper, but it's a blackout date").
+func exclusionReason(p FlexibleParams, entry DateScanEntry) string {
+	if p.AvailableFrom != "" {
+		if entry.DepartDate < p.AvailableFrom || (entry.ReturnDate != "" && entry.ReturnDate < p.AvailableFrom) {
+			return "before AvailableFrom " + p.AvailableFrom
+		}
+	}
+	if p.AvailableUntil != "" {
+		if entry.DepartDate > p.AvailableUntil || (entry.ReturnDate != "" && entry.ReturnDate > p.AvailableUntil) {
+			return "after AvailableUntil " + p.AvailableUntil
+		}
+	}
+	if len(p.ExcludeWeekdays) > 0 {
+		if depart, err := time.Parse("2006-01-02", entry.DepartDate); err == nil {
+			for _, wd := range p.ExcludeWeekdays {
+				if depart.Weekday() == wd {
+					return "excluded weekday " + wd.String()
+				}
+			}
+		}
+	}
+	for _, b := range p.BlackoutDates {
+		if entry.DepartDate == b || (entry.ReturnDate != "" && entry.ReturnDate == b) {
+			return "blackout date " + b
+		}
+	}
+	return ""
+}
+
+// anyPricedButExcluded distinguishes "the whole window came back empty"
+// from "prices came back fine, but every one was excluded" — the two
+// SearchFlexible failure modes read very differently.
+func anyPricedButExcluded(entries []DateScanEntry) bool {
+	for _, e := range entries {
+		if e.Queried && e.PriceUSD > 0 && e.Excluded != "" {
+			return true
+		}
+	}
+	return false
 }
