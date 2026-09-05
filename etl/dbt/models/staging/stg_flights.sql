@@ -11,5 +11,5 @@ select
     price_cents,
     currency,
     source,
-    scraped_at
+    created_at
 from {{ source('raw', 'flight_prices') }}
