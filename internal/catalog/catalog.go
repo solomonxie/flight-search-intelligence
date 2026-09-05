@@ -88,17 +88,18 @@ func (s *SQLite) InsertFlightPrices(ctx context.Context, rows []FlightPrice) err
 
 	stmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO flight_prices
-			(origin, destination, airline, depart_date, return_date, price_cents, currency, source, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+			(origin, destination, airline, depart_date, return_date, price_cents, currency, source, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return fmt.Errorf("catalog: preparing insert: %w", err)
 	}
 	defer stmt.Close()
 
 	for _, r := range rows {
+		createdAt := r.CreatedAt.UTC().Format(time.RFC3339)
 		if _, err := stmt.ExecContext(ctx,
 			r.Origin, r.Destination, r.Airline, r.DepartDate, r.ReturnDate,
-			r.PriceCents, r.Currency, r.Source, r.CreatedAt.UTC().Format(time.RFC3339),
+			r.PriceCents, r.Currency, r.Source, createdAt, createdAt,
 		); err != nil {
 			return fmt.Errorf("catalog: inserting row: %w", err)
 		}

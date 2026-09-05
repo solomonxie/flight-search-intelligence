@@ -33,7 +33,7 @@ dry-run-best-dates:
 	go run ./cmd/routesearch -origin $(ORIGIN) -destination $(DEST) -date $(DATE) \
 		-date-window-days $(WINDOW_DAYS) -scan-dates
 
-run-routesearch:
+dry-run-route-search-full:
 	go run ./cmd/routesearch -origin $(ORIGIN) -destination $(DEST) -date $(DATE) -return-date $(RETURN)
 
 # Full agent loop (see DESIGN.md "Agent loop" and internal/kafka's package
