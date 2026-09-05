@@ -114,13 +114,14 @@ func cheapestOffer(offers []googleflights.Offer) (googleflights.Offer, bool) {
 	return best, true
 }
 
-// cheapestDateScanEntry returns the cheapest queried, priced entry from a
-// flexible-date scan — nil if every date came back empty/infeasible.
+// cheapestDateScanEntry returns the cheapest queried, priced, eligible
+// (Excluded == "") entry from a flexible-date scan — nil if every date
+// came back empty/infeasible or none was eligible.
 func cheapestDateScanEntry(entries []DateScanEntry) *DateScanEntry {
 	var best *DateScanEntry
 	for i := range entries {
 		e := &entries[i]
-		if !e.Queried || e.PriceUSD <= 0 {
+		if !e.Queried || e.PriceUSD <= 0 || e.Excluded != "" {
 			continue
 		}
 		if best == nil || e.PriceUSD < best.PriceUSD {
