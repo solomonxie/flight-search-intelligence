@@ -62,10 +62,12 @@ func SearchRoundTrip(ctx context.Context, deps Deps, p Params, returnDate string
 	_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
 
 	log.Info("querying bundled round-trip baseline")
-	bundledOffers, _, err := deps.Flights.SearchFlightOffers(ctx, googleflights.SearchParams{
+	bundledOffers, live, err := deps.searchOffers(ctx, googleflights.SearchParams{
 		Origin: p.Origin, Destination: p.Destination, DepartureDate: p.DepartDate, ReturnDate: returnDate,
-	})
-	plan.QueriesUsed++
+	}, p.ForceRefresh)
+	if live {
+		plan.QueriesUsed++
+	}
 	plan.BundledQueried = true
 	switch {
 	case err != nil:

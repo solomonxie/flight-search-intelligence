@@ -46,10 +46,13 @@ func run() error {
 	delay := flag.Duration("delay", 3*time.Second, "pacing delay between scrapes (stand-in for Temporal's durable timer)")
 	dbPath := flag.String("db", "data/flight_search.db", "SQLite store path (price cache + audit trail)")
 	openflightsDir := flag.String("openflights-dir", "data/openflights", "cache dir for the OpenFlights airports/routes dataset")
+	forceRefresh := flag.Bool("force-refresh", false, "bypass the offers cache and scrape Google Flights live even for a query made within the last hour")
 
-	dateWindowDays := flag.Int("date-window-days", 0, "flexible-date sweep: +/- this many days around -date (0 disables flexible dates)")
-	dateStepDays := flag.Int("date-step-days", 1, "flexible-date sweep: sample every N days within the window")
+	dateWindowDays := flag.Int("date-window-days", 0, "flexible-date scan: +/- this many days around -date (0 disables flexible dates)")
+	dateStepDays := flag.Int("date-step-days", 1, "flexible-date scan: sample every N days within the window")
 	tripLengthDays := flag.Int("trip-length-days", 0, "flexible round trip: fixed trip length; defaults to (-return-date minus -date) if both given")
+	dryRun := flag.Bool("dry-run", false, "resolve airports + rank candidate hubs only, no scraping (step 1 of the algorithm; overrides every other mode below)")
+	scanDates := flag.Bool("scan-dates", false, "with -date-window-days, check the fare for each date in the window and stop — no connecting-hub search")
 	flag.Parse()
 
 	if *origin == "" || *destination == "" || *date == "" {
@@ -82,13 +85,22 @@ func run() error {
 		Origin: *origin, Destination: *destination, DepartDate: *date,
 		MaxHours: *maxHours, QueryBudget: *budget,
 		MinLayoverMinutes: *minLayover, MaxLayoverMinutes: *maxLayover,
-		PricePerMile: *pricePerMile, Delay: *delay,
+		PricePerMile: *pricePerMile, Delay: *delay, ForceRefresh: *forceRefresh,
 	}
 
 	// No overall context deadline anywhere below: this is a deliberately
 	// slow, days-SLA search (see DESIGN.md "Pacing") — only bounded by
 	// -budget/-date-window-days, not by wall-clock time.
 	ctx := context.Background()
+
+	if *dryRun {
+		preview, err := routesearch.ResolveCandidates(ctx, deps, base)
+		if err != nil {
+			return err
+		}
+		printCandidatePreview(preview)
+		return nil
+	}
 
 	switch {
 	case *dateWindowDays > 0:
@@ -103,7 +115,7 @@ func run() error {
 		}
 		plan, err := routesearch.SearchFlexible(ctx, deps, routesearch.FlexibleParams{
 			Base: base, RoundTrip: *returnDate != "", TripLengthDays: tripLen,
-			WindowDays: *dateWindowDays, StepDays: *dateStepDays,
+			WindowDays: *dateWindowDays, StepDays: *dateStepDays, ScanOnly: *scanDates,
 		})
 		if err != nil {
 			return err
@@ -177,9 +189,9 @@ func printRoundTrip(plan *routesearch.RoundTripPlan) {
 }
 
 func printFlexible(plan *routesearch.FlexiblePlan) {
-	fmt.Printf("\nDate sweep (Phase A) — %d date point(s) tried:\n", len(plan.DateSweep))
+	fmt.Printf("\nDate scan (Phase A) — %d date point(s) tried:\n", len(plan.DateScan))
 	fmt.Printf("%-12s %-12s %-9s %s\n", "Depart", "Return", "Price $", "Note")
-	for _, e := range plan.DateSweep {
+	for _, e := range plan.DateScan {
 		price := ""
 		if e.PriceUSD > 0 {
 			price = fmt.Sprintf("%.0f", e.PriceUSD)
@@ -189,6 +201,15 @@ func printFlexible(plan *routesearch.FlexiblePlan) {
 			marker = "<- chosen"
 		}
 		fmt.Printf("%-12s %-12s %-9s %s %s\n", e.DepartDate, e.ReturnDate, price, e.Reason, marker)
+	}
+
+	if plan.AnchoredPlanID == "" {
+		fmt.Printf("\nChosen date: %s", plan.ChosenDepartDate)
+		if plan.ChosenReturnDate != "" {
+			fmt.Printf(" / %s", plan.ChosenReturnDate)
+		}
+		fmt.Println(" (-scan-dates: connecting-hub search skipped)")
+		return
 	}
 
 	fmt.Printf("\nPhase B ran on %s", plan.ChosenDepartDate)
@@ -230,6 +251,22 @@ func describeResult(r routesearch.Result) string {
 // printCandidates prints the full audit-trail table — rank 0 is always
 // the direct baseline every hub candidate is measured against, in the
 // same table as the hub candidates rather than off to the side.
+// printCandidatePreview renders ResolveCandidates' output (-dry-run):
+// airport resolution + ranked hub candidates, no scraping done.
+func printCandidatePreview(p *routesearch.CandidatePreview) {
+	fmt.Printf("%s (%s, %s) -> %s (%s, %s)\n",
+		p.Origin.IATA, p.Origin.Name, p.Origin.City,
+		p.Destination.IATA, p.Destination.Name, p.Destination.City)
+	fmt.Printf("Direct distance: %.0f mi. Direct nonstop exists: %v.\n", p.DirectDistanceMiles, p.HasNonstop)
+
+	fmt.Printf("\n%d raw candidate hub(s), %d survive the geometry prune, ranked by lower-bound price:\n",
+		p.CandidatesConsidered, p.CandidatesAfterGeometryPrune)
+	fmt.Printf("%-6s %-9s %-10s %-10s\n", "Hub", "LB $", "Leg1 mi", "Leg2 mi")
+	for _, h := range p.RankedHubs {
+		fmt.Printf("%-6s %-9.0f %-10.0f %-10.0f\n", h.Hub, h.LBUSD, h.Leg1Miles, h.Leg2Miles)
+	}
+}
+
 func printCandidates(plan *routesearch.Plan) {
 	fmt.Printf("\n%-5s %-6s %-9s %-18s %-8s %-8s %-11s %s\n",
 		"Rank", "Hub", "LB $", "Outcome", "Leg1 $", "Leg2 $", "Combined $", "Reason")

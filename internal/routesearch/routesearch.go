@@ -36,6 +36,7 @@ type Params struct {
 	MaxLayoverMinutes int
 	PricePerMile      float64       // fallback lower-bound prior when nothing's cached
 	Delay             time.Duration // stand-in for Temporal's durable timer; see DESIGN.md "Pacing"
+	ForceRefresh      bool          // bypass the offers cache and scrape live even within offersCacheFreshness
 }
 
 // LegOutcome records what happened (or didn't) when a single leg was
@@ -107,12 +108,67 @@ func estimateMinutes(distanceMiles float64) float64 {
 	return distanceMiles/avgCruiseMPH*60 + perLegOverheadMinute
 }
 
-// candidate is a hub still in play after the geometry prune, ordered by
-// lb (the admissible lower-bound estimate of the full A→hub→B price).
-type candidate struct {
-	hub    string
-	lb     float64
-	leg2mi float64
+// RankedHub is a hub still in play after the geometry prune, ordered by
+// LBUSD (the admissible lower-bound estimate of the full A→hub→B price).
+type RankedHub struct {
+	Hub       string  `json:"hub"`
+	LBUSD     float64 `json:"lb_usd"`
+	Leg1Miles float64 `json:"leg1_miles"`
+	Leg2Miles float64 `json:"leg2_miles"`
+}
+
+// CandidatePreview is Search's Step 0/1 setup — airport resolution, raw
+// hub candidates, geometry prune, and lower-bound ranking — with no
+// scraping done yet. See ResolveCandidates.
+type CandidatePreview struct {
+	Origin, Destination          openflights.Airport
+	DirectDistanceMiles          float64
+	HasNonstop                   bool
+	CandidatesConsidered         int
+	CandidatesAfterGeometryPrune int
+	RankedHubs                   []RankedHub
+}
+
+// ResolveCandidates runs Search's candidate-generation step standalone:
+// resolve p.Origin/p.Destination, pull hub candidates from the route
+// graph, geometry-prune the ones that can't fit p.MaxHours even with a
+// minimum layover, and rank survivors by lower-bound price (cached price
+// if the store has one, else distance × p.PricePerMile). No network
+// calls — Search calls this too, so the two never drift, and it's cheap
+// to run standalone (cmd/routesearch -dry-run) while testing.
+func ResolveCandidates(ctx context.Context, deps Deps, p Params) (*CandidatePreview, error) {
+	origin, ok1 := deps.Graph.Airport(p.Origin)
+	destination, ok2 := deps.Graph.Airport(p.Destination)
+	if !ok1 || !ok2 {
+		return nil, fmt.Errorf("routesearch: unknown airport (origin ok=%v, destination ok=%v)", ok1, ok2)
+	}
+
+	rawHubs := deps.Graph.CandidateHubs(p.Origin, p.Destination)
+	preview := &CandidatePreview{
+		Origin:               origin,
+		Destination:          destination,
+		DirectDistanceMiles:  openflights.DistanceMiles(origin, destination),
+		HasNonstop:           deps.Graph.HasNonstop(p.Origin, p.Destination),
+		CandidatesConsidered: len(rawHubs),
+	}
+
+	for _, h := range rawHubs {
+		hub, ok := deps.Graph.Airport(h)
+		if !ok {
+			continue
+		}
+		d1 := openflights.DistanceMiles(origin, hub)
+		d2 := openflights.DistanceMiles(hub, destination)
+		if estimateMinutes(d1)+estimateMinutes(d2)+float64(p.MinLayoverMinutes) > p.MaxHours*60 {
+			continue // geometry prune: can't fit even with a minimum-length layover
+		}
+		lb1 := deps.lowerBoundUSD(ctx, p.Origin, h, p.DepartDate, d1, p.PricePerMile)
+		lb2 := deps.lowerBoundUSD(ctx, h, p.Destination, p.DepartDate, d2, p.PricePerMile)
+		preview.RankedHubs = append(preview.RankedHubs, RankedHub{Hub: h, LBUSD: lb1 + lb2, Leg1Miles: d1, Leg2Miles: d2})
+	}
+	preview.CandidatesAfterGeometryPrune = len(preview.RankedHubs)
+	sort.Slice(preview.RankedHubs, func(i, j int) bool { return preview.RankedHubs[i].LBUSD < preview.RankedHubs[j].LBUSD })
+	return preview, nil
 }
 
 // Search runs the algorithm end to end: baseline direct search, hub
@@ -129,8 +185,8 @@ func Search(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 		log.Warn("saving initial plan failed", "error", err)
 	}
 
-	origin, ok1 := deps.Graph.Airport(p.Origin)
-	destination, ok2 := deps.Graph.Airport(p.Destination)
+	_, ok1 := deps.Graph.Airport(p.Origin)
+	_, ok2 := deps.Graph.Airport(p.Destination)
 	if !ok1 || !ok2 {
 		plan.Status = fmt.Sprintf("error: unknown airport (origin ok=%v, destination ok=%v)", ok1, ok2)
 		_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
@@ -144,14 +200,14 @@ func Search(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 	// single-ticket itinerary; every split-ticket candidate below only
 	// matters if it can beat this.
 	log.Info("querying baseline direct route")
-	baseOffers, _, err := deps.Flights.SearchFlightOffers(ctx, googleflights.SearchParams{
+	baseOffers, live, err := deps.searchOffers(ctx, googleflights.SearchParams{
 		Origin: p.Origin, Destination: p.Destination, DepartureDate: p.DepartDate,
-	})
-	queriesUsed++
+	}, p.ForceRefresh)
+	if live {
+		queriesUsed++
+	}
 	if err != nil {
 		log.Warn("baseline search failed", "error", err)
-	} else {
-		deps.recordOffers(ctx, p.Origin, p.Destination, p.DepartDate, baseOffers)
 	}
 	baseline := CandidateOutcome{Hub: "(direct)", Rank: 0}
 	if offer, dur, ok := pickCheapestFeasible(baseOffers, deps.Graph, p.MaxHours); ok {
@@ -174,26 +230,17 @@ func Search(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 
 	// Step 1: candidate hubs, geometry-pruned (pure arithmetic, no
 	// scrapes) and price-ranked (cache-first, else distance × $/mile).
-	rawHubs := deps.Graph.CandidateHubs(p.Origin, p.Destination)
-	plan.CandidatesConsidered = len(rawHubs)
-
-	var survivors []candidate
-	for _, h := range rawHubs {
-		hub, ok := deps.Graph.Airport(h)
-		if !ok {
-			continue
-		}
-		d1 := openflights.DistanceMiles(origin, hub)
-		d2 := openflights.DistanceMiles(hub, destination)
-		if estimateMinutes(d1)+estimateMinutes(d2)+float64(p.MinLayoverMinutes) > p.MaxHours*60 {
-			continue // geometry prune: can't fit even with a minimum-length layover
-		}
-		lb1 := deps.lowerBoundUSD(ctx, p.Origin, h, p.DepartDate, d1, p.PricePerMile)
-		lb2 := deps.lowerBoundUSD(ctx, h, p.Destination, p.DepartDate, d2, p.PricePerMile)
-		survivors = append(survivors, candidate{hub: h, lb: lb1 + lb2, leg2mi: d2})
+	// See ResolveCandidates — same logic, exposed standalone for
+	// dry-run inspection (cmd/routesearch -dry-run).
+	preview, err := ResolveCandidates(ctx, deps, p)
+	if err != nil {
+		plan.Status = fmt.Sprintf("error: %v", err)
+		_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
+		return plan, err
 	}
-	plan.CandidatesAfterGeometryPrune = len(survivors)
-	sort.Slice(survivors, func(i, j int) bool { return survivors[i].lb < survivors[j].lb })
+	plan.CandidatesConsidered = preview.CandidatesConsidered
+	plan.CandidatesAfterGeometryPrune = preview.CandidatesAfterGeometryPrune
+	survivors := preview.RankedHubs
 
 	log.Info("candidate hubs ready",
 		"considered", plan.CandidatesConsidered, "after_geometry_prune", plan.CandidatesAfterGeometryPrune)
@@ -201,7 +248,7 @@ func Search(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 	// Step 2: best-first, budget-bounded loop (see DESIGN.md
 	// "Exploration algorithm" for the full derivation).
 	for i, c := range survivors {
-		if best != nil && c.lb >= best.PriceUSD {
+		if best != nil && c.LBUSD >= best.PriceUSD {
 			markRemaining(plan, survivors[i:], i+1, "frontier_cutoff", "LB >= best.price")
 			break
 		}
@@ -210,32 +257,33 @@ func Search(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 			break
 		}
 
-		outcome := CandidateOutcome{Hub: c.hub, LBUSD: c.lb, Rank: i + 1}
-		log.Info("querying leg 1", "hub", c.hub, "lb_usd", c.lb)
+		outcome := CandidateOutcome{Hub: c.Hub, LBUSD: c.LBUSD, Rank: i + 1}
+		log.Info("querying leg 1", "hub", c.Hub, "lb_usd", c.LBUSD)
 
 		sleepPacing(ctx, p.Delay)
-		leg1Offers, _, err := deps.Flights.SearchFlightOffers(ctx, googleflights.SearchParams{
-			Origin: p.Origin, Destination: c.hub, DepartureDate: p.DepartDate,
-		})
-		queriesUsed++
-		deps.recordOffers(ctx, p.Origin, c.hub, p.DepartDate, leg1Offers)
+		leg1Offers, live, err := deps.searchOffers(ctx, googleflights.SearchParams{
+			Origin: p.Origin, Destination: c.Hub, DepartureDate: p.DepartDate,
+		}, p.ForceRefresh)
+		if live {
+			queriesUsed++
+		}
 
 		leg1, _, ok := pickCheapestFeasible(leg1Offers, deps.Graph, p.MaxHours)
 		if err != nil || !ok {
 			outcome.Leg1 = &LegOutcome{Queried: true, QueriedAt: time.Now(), Reason: "no feasible offer"}
 			outcome.Outcome = "leg1_infeasible"
 			plan.CandidatesRanked = append(plan.CandidatesRanked, outcome)
-			log.Info("leg 1 infeasible", "hub", c.hub)
+			log.Info("leg 1 infeasible", "hub", c.Hub)
 			continue
 		}
 		outcome.Leg1 = &LegOutcome{Queried: true, PriceUSD: float64(leg1.Price), QueriedAt: time.Now()}
 
-		hEst := deps.lowerBoundUSD(ctx, c.hub, p.Destination, p.DepartDate, c.leg2mi, p.PricePerMile)
+		hEst := deps.lowerBoundUSD(ctx, c.Hub, p.Destination, p.DepartDate, c.Leg2Miles, p.PricePerMile)
 		if best != nil && float64(leg1.Price)+hEst >= best.PriceUSD {
 			outcome.Outcome = "pruned"
 			outcome.Reason = "g1 + hEst >= best.price"
 			plan.CandidatesRanked = append(plan.CandidatesRanked, outcome)
-			log.Info("leg 2 skipped", "hub", c.hub, "reason", outcome.Reason)
+			log.Info("leg 2 skipped", "hub", c.Hub, "reason", outcome.Reason)
 			continue
 		}
 
@@ -249,20 +297,21 @@ func Search(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 		// Query leg 2 for the date leg 1 actually lands on — handles an
 		// overnight leg 1 landing the day after DepartDate.
 		leg2Date := dateString(leg1.Segments[len(leg1.Segments)-1].ArrivalDate)
-		log.Info("querying leg 2", "hub", c.hub, "date", leg2Date)
+		log.Info("querying leg 2", "hub", c.Hub, "date", leg2Date)
 		sleepPacing(ctx, p.Delay)
-		leg2Offers, _, err := deps.Flights.SearchFlightOffers(ctx, googleflights.SearchParams{
-			Origin: c.hub, Destination: p.Destination, DepartureDate: leg2Date,
-		})
-		queriesUsed++
-		deps.recordOffers(ctx, c.hub, p.Destination, leg2Date, leg2Offers)
+		leg2Offers, live, err := deps.searchOffers(ctx, googleflights.SearchParams{
+			Origin: c.Hub, Destination: p.Destination, DepartureDate: leg2Date,
+		}, p.ForceRefresh)
+		if live {
+			queriesUsed++
+		}
 
 		leg2, combined, layoverDur, feasible := deps.bestConnection(leg1, leg2Offers, p)
 		if err != nil || !feasible {
 			outcome.Leg2 = &LegOutcome{Queried: true, QueriedAt: time.Now(), Reason: "no feasible connection"}
 			outcome.Outcome = "leg2_infeasible"
 			plan.CandidatesRanked = append(plan.CandidatesRanked, outcome)
-			log.Info("leg 2 infeasible", "hub", c.hub)
+			log.Info("leg 2 infeasible", "hub", c.Hub)
 			continue
 		}
 
@@ -273,7 +322,7 @@ func Search(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 		plan.CandidatesRanked = append(plan.CandidatesRanked, outcome)
 
 		r := Result{
-			Path:            []string{p.Origin, c.hub, p.Destination},
+			Path:            []string{p.Origin, c.Hub, p.Destination},
 			PriceUSD:        float64(total),
 			DurationMinutes: int(combined.Minutes()),
 			SelfTransfer:    true,
@@ -284,7 +333,7 @@ func Search(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 		if best == nil || r.PriceUSD < best.PriceUSD {
 			best = &r
 		}
-		log.Info("candidate kept", "hub", c.hub, "combined_usd", r.PriceUSD, "duration_minutes", r.DurationMinutes)
+		log.Info("candidate kept", "hub", c.Hub, "combined_usd", r.PriceUSD, "duration_minutes", r.DurationMinutes)
 	}
 
 	plan.QueriesUsed = queriesUsed
@@ -303,10 +352,10 @@ func Search(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 // explicitly rather than inferred from len(plan.CandidatesRanked), since
 // that slice also holds the rank-0 baseline entry and would otherwise
 // shift every hub rank off by one.
-func markRemaining(plan *Plan, rest []candidate, startRank int, outcome, reason string) {
+func markRemaining(plan *Plan, rest []RankedHub, startRank int, outcome, reason string) {
 	for j, c := range rest {
 		plan.CandidatesRanked = append(plan.CandidatesRanked, CandidateOutcome{
-			Hub: c.hub, LBUSD: c.lb, Rank: startRank + j,
+			Hub: c.Hub, LBUSD: c.LBUSD, Rank: startRank + j,
 			Outcome: outcome, Reason: reason,
 		})
 	}
