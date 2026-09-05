@@ -154,9 +154,15 @@ func printCandidatePreview(p *routesearch.CandidatePreview) {
 
 	fmt.Printf("\n%d raw candidate hub(s), %d survive the geometry prune, ranked by lower-bound price:\n",
 		p.CandidatesConsidered, p.CandidatesAfterGeometryPrune)
-	fmt.Printf("%-6s %-9s %-10s %-10s\n", "Hub", "LB $", "Leg1 mi", "Leg2 mi")
-	for _, h := range p.RankedHubs {
-		fmt.Printf("%-6s %-9.0f %-10.0f %-10.0f\n", h.Hub, h.LBUSD, h.Leg1Miles, h.Leg2Miles)
+	// Direct merged in among the hubs by LB $, display only — p.RankedHubs
+	// itself stays hub-only, since Search reuses it as the literal scrape
+	// list and the direct row isn't an airport.
+	rows := append([]routesearch.RankedHub{p.DirectRow}, p.RankedHubs...)
+	sort.Slice(rows, func(i, j int) bool { return rows[i].LBUSD < rows[j].LBUSD })
+
+	fmt.Printf("%-9s %-9s %-10s %-10s\n", "Hub", "LB $", "Leg1 mi", "Leg2 mi")
+	for _, h := range rows {
+		fmt.Printf("%-9s %-9.0f %-10.0f %-10.0f\n", h.Hub, h.LBUSD, h.Leg1Miles, h.Leg2Miles)
 	}
 }
 

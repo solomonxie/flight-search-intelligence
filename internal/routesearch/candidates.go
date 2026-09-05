@@ -40,6 +40,7 @@ func ResolveCandidates(ctx context.Context, deps Deps, p Params) (*CandidatePrev
 		CandidatesConsidered: len(rawHubs),
 	}
 
+	var hubRows []RankedHub
 	for _, h := range rawHubs {
 		hub, ok := deps.Graph.Airport(h)
 		if !ok {
@@ -52,9 +53,24 @@ func ResolveCandidates(ctx context.Context, deps Deps, p Params) (*CandidatePrev
 		}
 		lb1 := deps.lowerBoundUSD(ctx, p.Origin, h, p.DepartDate, d1, p.PricePerMile)
 		lb2 := deps.lowerBoundUSD(ctx, h, p.Destination, p.DepartDate, d2, p.PricePerMile)
-		preview.RankedHubs = append(preview.RankedHubs, RankedHub{Hub: h, LBUSD: lb1 + lb2, Leg1Miles: d1, Leg2Miles: d2})
+		hubRows = append(hubRows, RankedHub{Hub: h, LBUSD: lb1 + lb2, Leg1Miles: d1, Leg2Miles: d2})
 	}
-	preview.CandidatesAfterGeometryPrune = len(preview.RankedHubs)
-	sort.Slice(preview.RankedHubs, func(i, j int) bool { return preview.RankedHubs[i].LBUSD < preview.RankedHubs[j].LBUSD })
+	preview.CandidatesAfterGeometryPrune = len(hubRows)
+	sort.Slice(hubRows, func(i, j int) bool { return hubRows[i].LBUSD < hubRows[j].LBUSD })
+	preview.RankedHubs = hubRows
+
+	// Direct (no hub) is its own field, not the head of RankedHubs — Search
+	// reuses RankedHubs as the literal list of hubs to scrape, and
+	// "<destination>+<" is not an airport. DirectRow exists purely for
+	// display: the baseline every hub candidate is trying to beat, same as
+	// rank 0 in Search's own audit trail. Leg2Miles: 0 marks it as a single
+	// leg, not a connection; the "<" marks the row as "straight there," not
+	// a hub named destination.IATA.
+	preview.DirectRow = RankedHub{
+		Hub:       destination.IATA + "<",
+		LBUSD:     deps.lowerBoundUSD(ctx, p.Origin, p.Destination, p.DepartDate, preview.DirectDistanceMiles, p.PricePerMile),
+		Leg1Miles: preview.DirectDistanceMiles,
+		Leg2Miles: 0,
+	}
 	return preview, nil
 }
