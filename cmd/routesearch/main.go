@@ -50,7 +50,7 @@ func run() error {
 	delay := flag.Duration("delay", 3*time.Second, "pacing delay between scrapes (stand-in for Temporal's durable timer)")
 	dbPath := flag.String("db", "data/flight_search.db", "SQLite store path (price cache + audit trail)")
 	openflightsDir := flag.String("openflights-dir", "data/openflights", "cache dir for the OpenFlights airports/routes dataset")
-	forceRefresh := flag.Bool("force-refresh", false, "bypass the offers cache and scrape Google Flights live even for a query made within the last hour")
+	forceRefresh := flag.Bool("force-refresh", false, "bypass the offers cache and scrape Google Flights live even for a query made within the last 24h")
 
 	dateWindowDays := flag.Int("date-window-days", 0, "flexible-date scan: +/- this many days around -date (0 disables flexible dates)")
 	dateStepDays := flag.Int("date-step-days", 1, "flexible-date scan: sample every N days within the window")
