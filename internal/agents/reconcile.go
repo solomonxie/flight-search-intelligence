@@ -1,23 +1,18 @@
 // Package agents holds the agent loop DESIGN.md's "Agent loop: LLM drives
-// the search, Go stays narrow" describes — and, deliberately, no workflow
-// engine. Durable state lives in agent_requests/agent_tasks
-// (internal/catalog), not in a long-lived process or a replay log: each
-// call to AdvanceRequest reads a row, does at most one step, and writes
-// the result back before returning. A crash between ticks loses nothing,
-// because nothing was ever held only in memory — the same property
-// Temporal's durable execution gives, bought here with a state table and
-// a poll loop instead of a workflow engine (see DESIGN.md "Agent loop"
-// for why: this project's days-scale SLA and low, email-bounded request
-// volume don't need Temporal's core value — high throughput, complex
-// sagas, millisecond reactivity — so the row-plus-poller version trades a
-// little latency between ticks for one fewer stateful service to run).
+// the search, Go stays narrow" describes. Durable state lives in
+// agent_requests/agent_tasks (internal/catalog), not in a long-lived
+// process or a workflow engine's replay log — every step commits to a row
+// before returning, so a crash mid-step loses nothing.
 //
-// "Async" here means: dispatching a search never blocks — it writes an
-// agent_tasks row and returns; cmd/collector -worker claims and runs it
-// on its own schedule, in its own goroutine. The reconciler
-// (cmd/email-intake -worker) only ever touches requests that are actually
-// ready to move, so one poll tick over thousands of "waiting" requests
-// costs one query each, not a blocked goroutine each.
+// What triggers a step is internal/kafka, not a poll loop: a request
+// becomes ready to decide, or a task becomes ready to run, and something
+// (a follow-up email, a finished search) pushes a tiny message saying so.
+// That's what makes this "async" in the sense that matters — nothing sits
+// there checking on a timer, a step only runs because something real
+// happened. The functions in this file are what a message's consumer
+// (cmd/agent-worker, cmd/collector) actually calls once it gets one; they
+// don't know Kafka exists, they just take a request/task id and the
+// database, and do exactly one step.
 package agents
 
 import (
@@ -41,8 +36,8 @@ const (
 )
 
 // NewRequest builds a fresh Spec + its initial JSON encoding, ready for
-// catalog.CreateAgentRequest — the entry point DESIGN.md's email intake
-// (or, for now, cmd/email-intake -start) calls for a new request.
+// catalog.CreateAgentRequest — the entry point cmd/email-intake -start
+// calls for a new request.
 func NewRequest(origin, destination, departDate, returnDate string, maxHours float64, queryBudget int, softConstraints []string) (Spec, []byte, error) {
 	spec := Spec{
 		Origin: origin, Destination: destination, DepartDate: departDate, ReturnDate: returnDate,
@@ -57,9 +52,9 @@ func NewRequest(origin, destination, departDate, returnDate string, maxHours flo
 
 // AppendSoftConstraint decodes specJSON, appends text, and re-encodes —
 // how a follow-up email (cmd/email-intake -signal) lands into a request's
-// spec (DESIGN.md "Continuous email / mid-flight interruption") without
-// the reconciler needing any separate signal mechanism: the next tick
-// that reads this row just sees the updated spec.
+// spec (DESIGN.md "Continuous email / mid-flight interruption"). It's
+// just a database update: whatever step runs next for this request reads
+// the spec fresh, so there's nothing else to notify.
 func AppendSoftConstraint(specJSON []byte, text string) ([]byte, error) {
 	var spec Spec
 	if err := json.Unmarshal(specJSON, &spec); err != nil {
@@ -73,101 +68,65 @@ func AppendSoftConstraint(specJSON []byte, text string) ([]byte, error) {
 	return b, nil
 }
 
-// AdvanceRequest is one poll tick's worth of work for one request: read
-// its row, and — only if it's actually ready to move — do exactly one
-// step (examine a finished task, decide the next action, dispatch a new
-// task, or finalize). A request whose dispatched task hasn't finished yet
-// is left untouched; the caller (cmd/email-intake -worker) just calls this
-// again next tick.
-func AdvanceRequest(ctx context.Context, db *catalog.SQLite, row catalog.AgentRequestRow) error {
+// Decide is one request's decision step — what cmd/agent-worker calls
+// after reading a DecisionTrigger off internal/kafka's agent-decisions
+// topic. It loads the row, asks DecideNextAction what to do, and either
+// dispatches a new task (returning its id so the caller can push it onto
+// the search-tasks topic) or finalizes (returning ok=false — the signal
+// to push no further message, which is how the chain stops).
+//
+// Guards against a stale/duplicate trigger: a request already
+// "dispatched" (still waiting on its current task) or "finalized" is left
+// untouched — decide is only meaningful in "awaiting_decision".
+func Decide(ctx context.Context, db *catalog.SQLite, requestID string) (taskID string, ok bool, err error) {
+	row, err := db.LoadAgentRequest(ctx, requestID)
+	if err != nil {
+		return "", false, err
+	}
+	if row.Status != StatusAwaitingDecision {
+		return "", false, nil // already handled, or not ready yet — not an error
+	}
+
 	var spec Spec
 	if err := json.Unmarshal([]byte(row.SpecJSON), &spec); err != nil {
-		return fmt.Errorf("agents: decoding spec for %s: %w", row.RequestID, err)
+		return "", false, fmt.Errorf("agents: decoding spec for %s: %w", requestID, err)
 	}
 	var rounds []RoundRecord
 	if err := json.Unmarshal([]byte(row.RoundsJSON), &rounds); err != nil {
-		return fmt.Errorf("agents: decoding rounds for %s: %w", row.RequestID, err)
+		return "", false, fmt.Errorf("agents: decoding rounds for %s: %w", requestID, err)
 	}
 
-	switch row.Status {
-	case StatusDispatched:
-		return advanceDispatched(ctx, db, row.RequestID, rounds)
-	case StatusAwaitingDecision:
-		return advanceAwaitingDecision(ctx, db, row.RequestID, spec, rounds)
-	default:
-		return nil // deferred (unimplemented) or finalized: nothing to do
-	}
-}
-
-// advanceDispatched checks whether the current round's task has finished
-// and, if so, folds its result into the round history and hands the
-// request back to "awaiting_decision" for the next tick to examine.
-func advanceDispatched(ctx context.Context, db *catalog.SQLite, requestID string, rounds []RoundRecord) error {
-	if len(rounds) == 0 {
-		return fmt.Errorf("agents: %s is 'dispatched' with no rounds recorded", requestID)
-	}
-	last := &rounds[len(rounds)-1]
-	task, err := db.GetAgentTask(ctx, last.TaskID)
-	if err != nil {
-		return err
-	}
-
-	switch task.Status {
-	case "pending", "claimed":
-		return nil // still waiting; try again next tick
-	case "done":
-		var result CollectRouteResult
-		if task.ResultJSON.Valid {
-			if err := json.Unmarshal([]byte(task.ResultJSON.String), &result); err != nil {
-				return fmt.Errorf("agents: decoding task result for %s: %w", task.TaskID, err)
-			}
-		}
-		last.Result = &result
-	case "failed":
-		// Treated the same as "no offers": DecideNextAction's stub policy
-		// already widens and retries on that signal. The actual error is
-		// still on the task row (task.Error) for debugging.
-		last.Result = &CollectRouteResult{}
-	default:
-		return fmt.Errorf("agents: task %s has unknown status %q", task.TaskID, task.Status)
-	}
-
-	roundsJSON, err := json.Marshal(rounds)
-	if err != nil {
-		return fmt.Errorf("agents: encoding rounds for %s: %w", requestID, err)
-	}
-	return db.SaveAgentRequestState(ctx, requestID, StatusAwaitingDecision, roundsJSON, nil, "", "")
-}
-
-// advanceAwaitingDecision calls the (stub, for now) decision function and
-// either dispatches a new task or finalizes the request.
-func advanceAwaitingDecision(ctx context.Context, db *catalog.SQLite, requestID string, spec Spec, rounds []RoundRecord) error {
 	decision, err := DecideNextAction(ctx, spec, rounds)
 	if err != nil {
-		return fmt.Errorf("agents: DecideNextAction for %s: %w", requestID, err)
+		return "", false, fmt.Errorf("agents: DecideNextAction for %s: %w", requestID, err)
 	}
 
 	if decision.Action == ActionDispatch && len(rounds) < RedispatchCap {
 		round := len(rounds) + 1
-		taskID := fmt.Sprintf("%s-round-%d", requestID, round)
+		taskID = fmt.Sprintf("%s-round-%d", requestID, round)
 		paramsJSON, err := json.Marshal(decision.Request)
 		if err != nil {
-			return fmt.Errorf("agents: encoding task params for %s: %w", taskID, err)
+			return "", false, fmt.Errorf("agents: encoding task params for %s: %w", taskID, err)
 		}
 		if err := db.CreateAgentTask(ctx, taskID, requestID, round, paramsJSON); err != nil {
-			return err
+			return "", false, err
 		}
 
 		rounds = append(rounds, RoundRecord{Round: round, Spec: spec, Decision: decision, TaskID: taskID})
 		roundsJSON, err := json.Marshal(rounds)
 		if err != nil {
-			return fmt.Errorf("agents: encoding rounds for %s: %w", requestID, err)
+			return "", false, fmt.Errorf("agents: encoding rounds for %s: %w", requestID, err)
 		}
-		return db.SaveAgentRequestState(ctx, requestID, StatusDispatched, roundsJSON, nil, "", "")
+		if err := db.SaveAgentRequestState(ctx, requestID, StatusDispatched, roundsJSON, nil, "", ""); err != nil {
+			return "", false, err
+		}
+		return taskID, true, nil
 	}
 
 	// Finalize: either the decision said so, or the redispatch cap forced
 	// it (DESIGN.md: "hitting either forces finalize-with-what-you-have").
+	// No task id, ok=false: cmd/agent-worker pushes nothing further, and
+	// that absence of a next message is the whole "stop" signal.
 	finalizedBy := "satisfied"
 	if decision.Action == ActionDispatch && len(rounds) >= RedispatchCap {
 		finalizedBy = "round_cap"
@@ -175,11 +134,63 @@ func advanceAwaitingDecision(ctx context.Context, db *catalog.SQLite, requestID 
 
 	emailBody, err := DraftFinalEmail(ctx, spec, rounds)
 	if err != nil {
-		return fmt.Errorf("agents: DraftFinalEmail for %s: %w", requestID, err)
+		return "", false, fmt.Errorf("agents: DraftFinalEmail for %s: %w", requestID, err)
 	}
 	roundsJSON, err := json.Marshal(rounds)
 	if err != nil {
-		return fmt.Errorf("agents: encoding rounds for %s: %w", requestID, err)
+		return "", false, fmt.Errorf("agents: encoding rounds for %s: %w", requestID, err)
 	}
-	return db.SaveAgentRequestState(ctx, requestID, StatusFinalized, roundsJSON, nil, emailBody, finalizedBy)
+	return "", false, db.SaveAgentRequestState(ctx, requestID, StatusFinalized, roundsJSON, nil, emailBody, finalizedBy)
+}
+
+// RecordTaskResult is what cmd/collector calls right after it saves a
+// finished (or failed) task's outcome — folds that outcome into its
+// request's round history and hands the request back to
+// "awaiting_decision". Returns the request id so the caller can push a
+// DecisionTrigger for it onto the agent-decisions topic, waking the next
+// round's Decide call.
+func RecordTaskResult(ctx context.Context, db *catalog.SQLite, taskID string) (requestID string, err error) {
+	task, err := db.GetAgentTask(ctx, taskID)
+	if err != nil {
+		return "", err
+	}
+	row, err := db.LoadAgentRequest(ctx, task.RequestID)
+	if err != nil {
+		return "", err
+	}
+	var rounds []RoundRecord
+	if err := json.Unmarshal([]byte(row.RoundsJSON), &rounds); err != nil {
+		return "", fmt.Errorf("agents: decoding rounds for %s: %w", task.RequestID, err)
+	}
+	if len(rounds) == 0 {
+		return "", fmt.Errorf("agents: %s has no rounds recorded for task %s", task.RequestID, taskID)
+	}
+	last := &rounds[len(rounds)-1]
+
+	switch task.Status {
+	case "done":
+		var result CollectRouteResult
+		if task.ResultJSON.Valid {
+			if err := json.Unmarshal([]byte(task.ResultJSON.String), &result); err != nil {
+				return "", fmt.Errorf("agents: decoding task result for %s: %w", taskID, err)
+			}
+		}
+		last.Result = &result
+	case "failed":
+		// Treated the same as "no offers": DecideNextAction's stub policy
+		// already knows how to widen and retry on that signal. The
+		// actual error is still on the task row (task.Error) for debugging.
+		last.Result = &CollectRouteResult{}
+	default:
+		return "", fmt.Errorf("agents: task %s has status %q, not done/failed yet", taskID, task.Status)
+	}
+
+	roundsJSON, err := json.Marshal(rounds)
+	if err != nil {
+		return "", fmt.Errorf("agents: encoding rounds for %s: %w", task.RequestID, err)
+	}
+	if err := db.SaveAgentRequestState(ctx, task.RequestID, StatusAwaitingDecision, roundsJSON, nil, "", ""); err != nil {
+		return "", err
+	}
+	return task.RequestID, nil
 }
