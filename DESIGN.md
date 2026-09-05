@@ -574,7 +574,9 @@ for, not just how to search a graph it already has.
   graph, not a plain airport graph.
 - **Edges**: one scraped leg (origin, destination, date) → price +
   duration + concrete departure/arrival times (`googleflights.Offer.
-  Segments`, already returned today).
+  Segments`, already returned today). **Nonstop only** — see "Our hops
+  vs. Google's hops" below; a leg query is never allowed to be itself a
+  connection.
 - **Weight to minimize**: price.
 - **Hard constraints** (feasibility, not objectives, unlike price): total
   elapsed time (departure to final arrival, layovers included) ≤ the
@@ -586,6 +588,37 @@ for, not just how to search a graph it already has.
   through a hub) that price differently than a through-fare. Step 0 is
   always the plain A→B search (1 scrape): both the answer-of-last-resort
   and the price/duration bound everything else prunes against.
+
+**Our hops vs. Google's hops — two different meanings of "connection" that
+must never nest.** `routesearch` decides its own topology (which hub(s)
+to force a self-transfer through), chosen from OpenFlights schedule data
+specifically because a **nonstop** `A→hub`/`hub→B` route exists
+(`Graph.CandidateHubs`). Separately, Google Flights decides its own
+connections for whatever (origin, destination, date) it's asked to price
+— it is always free to answer a plain query with a multi-stop itinerary
+through a third airport `routesearch` never chose or saw. Left alone,
+these two notions of "hop" nest silently: a leg query for `A→hub` can
+come back as an itinerary that itself connects through some airport `X`,
+so a candidate the algorithm thinks is "2 legs via hub" is actually a
+4+ segment real itinerary, and every downstream thing built on "one hop =
+one flight" breaks along with it — the geometry-prune bound (assumed
+roughly-direct flight time per hop), the self-transfer layover-risk count
+(one flagged layover per hub *we* chose; Google's hidden connection adds
+an unflagged one), and `MaxLegs`/`MaxCountries` (Deeper itineraries",
+above) as real caps on transfers.
+
+**Resolved: every leg query `routesearch` issues itself is nonstop-only**
+(`googleflights.SearchParams.MaxStops` set via `NonstopOnly()`, value `1`
+— this protobuf's stops field is 1-based like `Seat`/`Trip`, so `1` means
+nonstop, not `0`) — `A→hub`, `hub→B`, and any future N-hop leg. This
+makes "our hop" and "Google's hop" the same thing by construction; they
+can no longer nest. If a candidate hub has no live
+nonstop fare that day (OpenFlights schedule existence isn't a same-day
+fare guarantee), the leg comes back infeasible and the candidate is
+pruned — correct, not a bug. The **Step 0 baseline** (plain A→B) stays
+deliberately unrestricted: its whole job is to capture Google's own best
+full itinerary, stops and all, as the price/duration floor the hub search
+has to beat.
 
 **Bounding the search** (the actual "smart" part — otherwise this is an
 unbounded fan-out over every airport on Earth):
