@@ -76,8 +76,11 @@ func printFlexible(plan *routesearch.FlexiblePlan) {
 		if e.ReturnDate != "" {
 			label += "/" + e.ReturnDate
 		}
-		if e.DepartDate == plan.ChosenDepartDate && e.ReturnDate == plan.ChosenReturnDate {
+		switch {
+		case e.DepartDate == plan.ChosenDepartDate && e.ReturnDate == plan.ChosenReturnDate:
 			label += " <- chosen"
+		case e.Excluded != "":
+			label += " (excluded: " + e.Excluded + ")"
 		}
 		byPrice[e.PriceUSD] = append(byPrice[e.PriceUSD], label)
 	}
