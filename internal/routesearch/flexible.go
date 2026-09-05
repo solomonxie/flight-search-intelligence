@@ -69,11 +69,16 @@ func SearchFlexible(ctx context.Context, deps Deps, p FlexibleParams) (*Flexible
 
 	log.Info("phase A: date scan", "window_days", p.WindowDays, "step_days", step, "round_trip", p.RoundTrip)
 	for offset := -p.WindowDays; offset <= p.WindowDays; offset += step {
-		entry := scanOneDate(ctx, deps, p, center, offset)
+		entry, live := scanOneDate(ctx, deps, p, center, offset)
 		plan.DateScan = append(plan.DateScan, entry)
 		log.Info("date scan point", "depart", entry.DepartDate, "return", entry.ReturnDate,
-			"price_usd", entry.PriceUSD, "reason", entry.Reason)
-		sleepPacing(ctx, p.Base.Delay)
+			"price_usd", entry.PriceUSD, "reason", entry.Reason, "live", live)
+		// Only pace a real scrape — a cache hit costs Google nothing, so
+		// waiting p.Base.Delay anyway made a fully-cached rerun look just
+		// as slow as the first live run, masking that the cache worked.
+		if live {
+			sleepPacing(ctx, p.Base.Delay)
+		}
 	}
 
 	best := cheapestDateScanEntry(plan.DateScan)
@@ -127,41 +132,41 @@ func SearchFlexible(ctx context.Context, deps Deps, p FlexibleParams) (*Flexible
 // scanOneDate is one Phase-A query: cheapest-by-price only, no hub
 // search — the whole point of this phase is staying cheap per date so a
 // wide window is affordable.
-func scanOneDate(ctx context.Context, deps Deps, p FlexibleParams, center time.Time, offsetDays int) DateScanEntry {
+func scanOneDate(ctx context.Context, deps Deps, p FlexibleParams, center time.Time, offsetDays int) (DateScanEntry, bool) {
 	depart := center.AddDate(0, 0, offsetDays).Format("2006-01-02")
 	entry := DateScanEntry{DepartDate: depart}
 
 	if p.RoundTrip {
 		ret := center.AddDate(0, 0, offsetDays+p.TripLengthDays).Format("2006-01-02")
 		entry.ReturnDate = ret
-		offers, _, err := deps.searchOffers(ctx, googleflights.SearchParams{
+		offers, live, err := deps.searchOffers(ctx, googleflights.SearchParams{
 			Origin: p.Base.Origin, Destination: p.Base.Destination, DepartureDate: depart, ReturnDate: ret,
 		}, p.Base.ForceRefresh)
 		entry.Queried = true
 		if err != nil {
 			entry.Reason = err.Error()
-			return entry
+			return entry, live
 		}
 		if offer, ok := cheapestOffer(offers); ok {
 			entry.PriceUSD = float64(offer.Price)
 		} else {
 			entry.Reason = "no offers"
 		}
-		return entry
+		return entry, live
 	}
 
-	offers, _, err := deps.searchOffers(ctx, googleflights.SearchParams{
+	offers, live, err := deps.searchOffers(ctx, googleflights.SearchParams{
 		Origin: p.Base.Origin, Destination: p.Base.Destination, DepartureDate: depart,
 	}, p.Base.ForceRefresh)
 	entry.Queried = true
 	if err != nil {
 		entry.Reason = err.Error()
-		return entry
+		return entry, live
 	}
 	if offer, _, ok := pickCheapestFeasible(offers, deps.Graph, p.Base.MaxHours); ok {
 		entry.PriceUSD = float64(offer.Price)
 	} else {
 		entry.Reason = "no feasible offer"
 	}
-	return entry
+	return entry, live
 }

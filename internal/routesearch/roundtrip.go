@@ -84,7 +84,9 @@ func SearchRoundTrip(ctx context.Context, deps Deps, p Params, returnDate string
 			plan.BundledReason = "no feasible bundled offer"
 		}
 	}
-	sleepPacing(ctx, p.Delay)
+	if live {
+		sleepPacing(ctx, p.Delay)
+	}
 
 	log.Info("searching outbound leg", "date", p.DepartDate)
 	outboundPlan, err := Search(ctx, deps, p)
