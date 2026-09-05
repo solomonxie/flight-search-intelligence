@@ -76,10 +76,7 @@ func printFlexible(plan *routesearch.FlexiblePlan) {
 		if e.ReturnDate != "" {
 			label += "/" + e.ReturnDate
 		}
-		switch {
-		case e.DepartDate == plan.ChosenDepartDate && e.ReturnDate == plan.ChosenReturnDate:
-			label += " <- chosen"
-		case e.Excluded != "":
+		if e.Excluded != "" {
 			label += " (excluded: " + e.Excluded + ")"
 		}
 		byPrice[e.PriceUSD] = append(byPrice[e.PriceUSD], label)
@@ -104,11 +101,10 @@ func printFlexible(plan *routesearch.FlexiblePlan) {
 	}
 
 	if plan.AnchoredPlanID == "" {
-		fmt.Printf("\nChosen date: %s", plan.ChosenDepartDate)
-		if plan.ChosenReturnDate != "" {
-			fmt.Printf(" / %s", plan.ChosenReturnDate)
-		}
-		fmt.Println(" (-scan-dates: connecting-hub search skipped)")
+		// -scan-dates: no Phase B ran, so there's no anchored result to
+		// report — the full priced list above is the output; picking from
+		// it is left to a later step (LLM re-rank or otherwise), not this
+		// print.
 		return
 	}
 
