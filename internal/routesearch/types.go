@@ -19,6 +19,7 @@ type Params struct {
 	QueryBudget       int
 	MinLayoverMinutes int
 	MaxLayoverMinutes int
+	MaxPrice          int           // USD hard ceiling on the whole trip; 0 = no cap
 	PricePerMile      float64       // fallback lower-bound prior when nothing's cached
 	Delay             time.Duration // stand-in for Temporal's durable timer; see DESIGN.md "Pacing"
 	ForceRefresh      bool          // bypass the offers cache and scrape live even within offersCacheFreshness

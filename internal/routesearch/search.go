@@ -38,7 +38,7 @@ func Search(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 	// matters if it can beat this.
 	log.Info("querying baseline direct route")
 	baseOffers, live, err := deps.searchOffers(ctx, googleflights.SearchParams{
-		Origin: p.Origin, Destination: p.Destination, DepartureDate: p.DepartDate,
+		Origin: p.Origin, Destination: p.Destination, DepartureDate: p.DepartDate, MaxPrice: maxPricePtr(p.MaxPrice),
 	}, p.ForceRefresh)
 	if live {
 		queriesUsed++
@@ -47,7 +47,7 @@ func Search(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 		log.Warn("baseline search failed", "error", err)
 	}
 	baseline := CandidateOutcome{Hub: "(direct)", Rank: 0}
-	if offer, dur, ok := pickCheapestFeasible(baseOffers, deps.Graph, p.MaxHours); ok {
+	if offer, dur, ok := pickCheapestFeasible(baseOffers, deps.Graph, p.MaxHours, float64(p.MaxPrice)); ok {
 		r := Result{Path: []string{p.Origin, p.Destination}, PriceUSD: float64(offer.Price), DurationMinutes: int(dur.Minutes())}
 		best = &r
 		plan.FinalResult = append(plan.FinalResult, r)
@@ -108,7 +108,7 @@ func Search(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 			sleepPacing(ctx, p.Delay)
 		}
 
-		leg1, _, ok := pickCheapestFeasible(leg1Offers, deps.Graph, p.MaxHours)
+		leg1, _, ok := pickCheapestFeasible(leg1Offers, deps.Graph, p.MaxHours, 0) // leg-only price, not the whole trip — bestConnection enforces p.MaxPrice on the combined total
 		if err != nil || !ok {
 			outcome.Leg1 = &LegOutcome{Queried: true, QueriedAt: time.Now(), Reason: "no feasible offer"}
 			outcome.Outcome = "leg1_infeasible"

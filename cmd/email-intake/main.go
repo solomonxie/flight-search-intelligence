@@ -6,17 +6,23 @@
 // process. See cmd/agent-worker for where the persistent, always-running
 // half of the agent loop actually lives now.
 //
-//   - -start: create a new request (stands in for an initial request
-//     email) and publish the first DecisionTrigger (internal/kafka) so
+//   - -start: create a new request from free text (stands in for an
+//     initial request email) — internal/agents.FormSpec turns it into a
+//     Spec — and publish the first DecisionTrigger (internal/kafka) so
 //     cmd/agent-worker picks it up.
-//   - -signal: append a soft constraint to an existing request (stands in
-//     for a reply email on an existing thread) — just a database update,
-//     no message needed; whatever runs next for that request reads the
-//     spec fresh.
+//   - -signal: fold follow-up text into an existing request's Spec
+//     (stands in for a reply email on an existing thread), via the same
+//     FormSpec call. If the request was parked awaiting a clarifying
+//     question (agents.StatusAwaitingUser), also flips it back to
+//     "awaiting_decision" and republishes a DecisionTrigger — the one
+//     case that needs an explicit nudge, since nothing else is in flight
+//     to wake it (DESIGN.md "no message needed" only covers the
+//     already-dispatched case).
 package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -39,44 +45,31 @@ func main() {
 func run() error {
 	_ = common.Load(".env")
 
-	start := flag.Bool("start", false, "create a new request (stands in for an initial request email)")
-	signal := flag.Bool("signal", false, "append a soft constraint to an existing request (stands in for a reply email)")
+	start := flag.Bool("start", false, "create a new request from free text (stands in for an initial request email)")
+	signal := flag.Bool("signal", false, "fold follow-up text into an existing request (stands in for a reply email)")
 	dbPath := flag.String("db", "data/flight_search.db", "SQLite store path")
-	kafkaBrokers := flag.String("kafka-brokers", "localhost:9092", "comma-separated Kafka broker addresses (-start only)")
+	kafkaBrokers := flag.String("kafka-brokers", "localhost:9092", "comma-separated Kafka broker addresses")
 
-	origin := flag.String("origin", "", "origin IATA airport code (-start)")
-	destination := flag.String("destination", "", "destination IATA airport code (-start)")
-	date := flag.String("date", "", "departure date, YYYY-MM-DD (-start)")
-	returnDate := flag.String("return-date", "", "return date, YYYY-MM-DD (-start, optional)")
-	maxHours := flag.Float64("max-hours", 30, "max tolerable total elapsed trip time, in hours (-start)")
-	budget := flag.Int("budget", 20, "max hub-search scrapes to spend (-start)")
-	softConstraintsCSV := flag.String("soft-constraints", "", "comma-separated plain-language constraints (-start), e.g. \"must be there for Christmas\"")
-	wait := flag.Bool("wait", false, "block and print the outcome once finalized (-start; dev convenience — real SES intake would not block)")
-
+	text := flag.String("text", "", "free-text request or follow-up — internal/agents.FormSpec extracts the structured Spec from this")
+	wait := flag.Bool("wait", false, "block and print the outcome once finalized or a question is asked (-start; dev convenience — real SES intake would not block)")
 	requestID := flag.String("request-id", "", "request to signal (-signal)")
-	text := flag.String("text", "", "follow-up text to append (-signal)")
 	flag.Parse()
 
+	brokers := strings.Split(*kafkaBrokers, ",")
 	switch {
 	case *start:
-		var soft []string
-		for _, s := range strings.Split(*softConstraintsCSV, ",") {
-			if s = strings.TrimSpace(s); s != "" {
-				soft = append(soft, s)
-			}
-		}
-		return startRequest(*dbPath, strings.Split(*kafkaBrokers, ","), *origin, *destination, *date, *returnDate, *maxHours, *budget, soft, *wait)
+		return startRequest(*dbPath, brokers, *text, *wait)
 	case *signal:
-		return sendFollowUp(*dbPath, *requestID, *text)
+		return sendFollowUp(*dbPath, brokers, *requestID, *text)
 	default:
 		flag.Usage()
 		return fmt.Errorf("one of -start or -signal is required")
 	}
 }
 
-func startRequest(dbPath string, brokers []string, origin, destination, date, returnDate string, maxHours float64, budget int, soft []string, wait bool) error {
-	if origin == "" || destination == "" || date == "" {
-		return fmt.Errorf("-origin, -destination, and -date are required with -start")
+func startRequest(dbPath string, brokers []string, text string, wait bool) error {
+	if text == "" {
+		return fmt.Errorf("-text is required with -start")
 	}
 
 	db, err := catalog.Open(dbPath)
@@ -85,13 +78,24 @@ func startRequest(dbPath string, brokers []string, origin, destination, date, re
 	}
 	defer db.Close()
 
-	_, specJSON, err := agents.NewRequest(origin, destination, date, returnDate, maxHours, budget, soft)
+	llmClient, err := agents.NewLLMClientFromEnv()
 	if err != nil {
-		return err
+		return fmt.Errorf("building LLM client: %w", err)
 	}
 
-	requestID := fmt.Sprintf("travel-request-%s-%s-%s-%d", origin, destination, date, time.Now().UnixNano())
 	ctx := context.Background()
+	spec, reasoning, err := agents.FormSpec(ctx, llmClient, agents.Spec{}, text)
+	if err != nil {
+		return fmt.Errorf("forming spec: %w", err)
+	}
+	fmt.Printf("Spec formed from text (%s):\n  %+v\n", reasoning, spec)
+
+	specJSON, err := json.Marshal(spec)
+	if err != nil {
+		return fmt.Errorf("encoding spec: %w", err)
+	}
+
+	requestID := fmt.Sprintf("travel-request-%d", time.Now().UnixNano())
 	if err := db.CreateAgentRequest(ctx, requestID, specJSON); err != nil {
 		return fmt.Errorf("creating request: %w", err)
 	}
@@ -115,15 +119,19 @@ func startRequest(dbPath string, brokers []string, origin, destination, date, re
 		if err != nil {
 			return err
 		}
-		if row.Status == agents.StatusFinalized {
+		switch row.Status {
+		case agents.StatusFinalized:
 			fmt.Printf("\nFinalized (%s):\n\n%s\n", row.FinalizedBy.String, row.EmailBody.String)
+			return nil
+		case agents.StatusAwaitingUser:
+			fmt.Printf("\nAgent needs more info before continuing:\n\n%s\n\nReply with:\n  go run ./cmd/email-intake -signal -request-id %s -text \"...\"\n", row.EmailBody.String, requestID)
 			return nil
 		}
 		time.Sleep(2 * time.Second)
 	}
 }
 
-func sendFollowUp(dbPath, requestID, text string) error {
+func sendFollowUp(dbPath string, brokers []string, requestID, text string) error {
 	if requestID == "" || text == "" {
 		return fmt.Errorf("-request-id and -text are required with -signal")
 	}
@@ -134,19 +142,48 @@ func sendFollowUp(dbPath, requestID, text string) error {
 	}
 	defer db.Close()
 
+	llmClient, err := agents.NewLLMClientFromEnv()
+	if err != nil {
+		return fmt.Errorf("building LLM client: %w", err)
+	}
+
 	ctx := context.Background()
 	row, err := db.LoadAgentRequest(ctx, requestID)
 	if err != nil {
 		return err
 	}
-	updated, err := agents.AppendSoftConstraint([]byte(row.SpecJSON), text)
-	if err != nil {
-		return err
-	}
-	if err := db.UpdateAgentRequestSpec(ctx, requestID, updated); err != nil {
-		return fmt.Errorf("updating spec: %w", err)
+	var existing agents.Spec
+	if err := json.Unmarshal([]byte(row.SpecJSON), &existing); err != nil {
+		return fmt.Errorf("decoding existing spec: %w", err)
 	}
 
+	updated, reasoning, err := agents.FormSpec(ctx, llmClient, existing, text)
+	if err != nil {
+		return fmt.Errorf("forming spec: %w", err)
+	}
+	fmt.Printf("Spec updated from follow-up (%s):\n  %+v\n", reasoning, updated)
+
+	updatedJSON, err := json.Marshal(updated)
+	if err != nil {
+		return fmt.Errorf("encoding spec: %w", err)
+	}
+	if err := db.UpdateAgentRequestSpec(ctx, requestID, updatedJSON); err != nil {
+		return fmt.Errorf("updating spec: %w", err)
+	}
 	fmt.Printf("Appended follow-up to %s: %q\n", requestID, text)
+
+	if row.Status != agents.StatusAwaitingUser {
+		return nil // a task's still in flight (or already finalized) — whatever runs next reads the spec fresh, no nudge needed
+	}
+
+	if err := db.SaveAgentRequestState(ctx, requestID, agents.StatusAwaitingDecision, []byte(row.RoundsJSON), nil, "", ""); err != nil {
+		return fmt.Errorf("reawakening request: %w", err)
+	}
+	producer := kafka.NewProducer(brokers, kafka.TopicAgentDecisions)
+	defer producer.Close()
+	if err := producer.Send(ctx, requestID, kafka.DecisionTrigger{RequestID: requestID}); err != nil {
+		return fmt.Errorf("publishing decision trigger: %w", err)
+	}
+	fmt.Println("Request was awaiting a reply to a clarifying question — reawakened and republished its decision trigger.")
 	return nil
 }

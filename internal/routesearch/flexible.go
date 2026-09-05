@@ -160,7 +160,7 @@ func scanOneDate(ctx context.Context, deps Deps, p FlexibleParams, center time.T
 		ret := center.AddDate(0, 0, offsetDays+p.TripLengthDays).Format("2006-01-02")
 		entry.ReturnDate = ret
 		offers, live, err := deps.searchOffers(ctx, googleflights.SearchParams{
-			Origin: p.Base.Origin, Destination: p.Base.Destination, DepartureDate: depart, ReturnDate: ret,
+			Origin: p.Base.Origin, Destination: p.Base.Destination, DepartureDate: depart, ReturnDate: ret, MaxPrice: maxPricePtr(p.Base.MaxPrice),
 		}, p.Base.ForceRefresh)
 		entry.Queried = true
 		if err != nil {
@@ -176,14 +176,14 @@ func scanOneDate(ctx context.Context, deps Deps, p FlexibleParams, center time.T
 	}
 
 	offers, live, err := deps.searchOffers(ctx, googleflights.SearchParams{
-		Origin: p.Base.Origin, Destination: p.Base.Destination, DepartureDate: depart,
+		Origin: p.Base.Origin, Destination: p.Base.Destination, DepartureDate: depart, MaxPrice: maxPricePtr(p.Base.MaxPrice),
 	}, p.Base.ForceRefresh)
 	entry.Queried = true
 	if err != nil {
 		entry.Reason = err.Error()
 		return entry, live
 	}
-	if offer, _, ok := pickCheapestFeasible(offers, deps.Graph, p.Base.MaxHours); ok {
+	if offer, _, ok := pickCheapestFeasible(offers, deps.Graph, p.Base.MaxHours, float64(p.Base.MaxPrice)); ok {
 		entry.PriceUSD = float64(offer.Price)
 	} else {
 		entry.Reason = "no feasible offer"
