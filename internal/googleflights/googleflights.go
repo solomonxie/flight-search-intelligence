@@ -106,17 +106,32 @@ type SearchParams struct {
 	DepartureDate string // YYYY-MM-DD
 	ReturnDate    string // YYYY-MM-DD, optional
 	Adults        int    // defaults to 1
+	MaxStops      *int   // nil = no restriction; see NonstopOnly
+}
+
+// NonstopOnly is the MaxStops value routesearch's own leg-level queries
+// use — forces Google to answer with a nonstop itinerary only, so a leg
+// query can never itself turn out to be a hidden connection through an
+// airport routesearch never chose (see DESIGN.md "Our hops vs. Google's
+// hops"). Not used for a plain A->B baseline query, which deliberately
+// wants Google's own best full itinerary, stops and all.
+//
+// 1, not 0: this protobuf's stops field follows the same 1-based
+// enum convention as Seat/Trip below (0 = unset/any, not "zero stops").
+func NonstopOnly() *int {
+	one := 1
+	return &one
 }
 
 func (p SearchParams) toQuery() Query {
 	if p.Adults <= 0 {
 		p.Adults = 1
 	}
-	legs := []Leg{{Date: p.DepartureDate, FromAirport: strings.ToUpper(p.Origin), ToAirport: strings.ToUpper(p.Destination)}}
+	legs := []Leg{{Date: p.DepartureDate, FromAirport: strings.ToUpper(p.Origin), ToAirport: strings.ToUpper(p.Destination), MaxStops: p.MaxStops}}
 	trip := TripOneWay
 	if p.ReturnDate != "" {
 		trip = TripRoundTrip
-		legs = append(legs, Leg{Date: p.ReturnDate, FromAirport: strings.ToUpper(p.Destination), ToAirport: strings.ToUpper(p.Origin)})
+		legs = append(legs, Leg{Date: p.ReturnDate, FromAirport: strings.ToUpper(p.Destination), ToAirport: strings.ToUpper(p.Origin), MaxStops: p.MaxStops})
 	}
 	return Query{
 		Legs:       legs,
