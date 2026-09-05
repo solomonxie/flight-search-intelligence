@@ -106,7 +106,7 @@ func saveOffers(dbPath, origin, destination, departDate, returnDate string, offe
 	}
 	defer db.Close()
 
-	scrapedAt := time.Now()
+	createdAt := time.Now()
 	rows := make([]catalog.FlightPrice, len(offers))
 	for i, o := range offers {
 		rows[i] = catalog.FlightPrice{
@@ -118,7 +118,7 @@ func saveOffers(dbPath, origin, destination, departDate, returnDate string, offe
 			PriceCents:  int64(o.Price) * 100,
 			Currency:    "USD",
 			Source:      "google_flights",
-			ScrapedAt:   scrapedAt,
+			CreatedAt:   createdAt,
 		}
 	}
 	return db.InsertFlightPrices(context.Background(), rows)

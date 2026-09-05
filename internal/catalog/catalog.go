@@ -19,7 +19,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-var requiredTables = []string{"flight_prices", "route_search_plans", "agent_requests", "agent_tasks"}
+var requiredTables = []string{"flight_prices", "flight_offers_cache", "route_search_plans", "agent_requests", "agent_tasks"}
 
 // FlightPrice is one row of etl/dbt's `raw.flight_prices` source shape
 // (see etl/dbt/models/staging/stg_flights.sql) — one price observation.
@@ -32,7 +32,7 @@ type FlightPrice struct {
 	PriceCents  int64
 	Currency    string
 	Source      string // provider name, e.g. "google_flights"
-	ScrapedAt   time.Time
+	CreatedAt   time.Time
 }
 
 // SQLite is a thin wrapper around the flight_prices table.
@@ -88,7 +88,7 @@ func (s *SQLite) InsertFlightPrices(ctx context.Context, rows []FlightPrice) err
 
 	stmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO flight_prices
-			(origin, destination, airline, depart_date, return_date, price_cents, currency, source, scraped_at)
+			(origin, destination, airline, depart_date, return_date, price_cents, currency, source, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return fmt.Errorf("catalog: preparing insert: %w", err)
@@ -98,7 +98,7 @@ func (s *SQLite) InsertFlightPrices(ctx context.Context, rows []FlightPrice) err
 	for _, r := range rows {
 		if _, err := stmt.ExecContext(ctx,
 			r.Origin, r.Destination, r.Airline, r.DepartDate, r.ReturnDate,
-			r.PriceCents, r.Currency, r.Source, r.ScrapedAt.UTC().Format(time.RFC3339),
+			r.PriceCents, r.Currency, r.Source, r.CreatedAt.UTC().Format(time.RFC3339),
 		); err != nil {
 			return fmt.Errorf("catalog: inserting row: %w", err)
 		}
@@ -128,6 +128,51 @@ func (s *SQLite) CachedPriceCents(ctx context.Context, origin, destination, depa
 		return 0, false, nil
 	}
 	return n.Int64, true, nil
+}
+
+// CachedOffers returns the most recent flight_offers_cache row for this
+// exact (origin, destination, depart_date, return_date), if one was
+// scraped within maxAge — the cache-first read that lets a search skip a
+// live Google Flights scrape. offersJSON is the raw JSON this search's
+// caller marshaled the offers slice into; ok is false on a miss (nothing
+// cached, or the newest row is older than maxAge).
+func (s *SQLite) CachedOffers(ctx context.Context, origin, destination, departDate, returnDate string, maxAge time.Duration) (offersJSON []byte, createdAt time.Time, ok bool, err error) {
+	row := s.db.QueryRowContext(ctx, `
+		SELECT offers_json, created_at FROM flight_offers_cache
+		WHERE origin = ? AND destination = ? AND depart_date = ? AND return_date = ?
+		ORDER BY created_at DESC LIMIT 1`,
+		origin, destination, departDate, returnDate)
+
+	var json, createdAtStr string
+	if err := row.Scan(&json, &createdAtStr); err != nil {
+		if err == sql.ErrNoRows {
+			return nil, time.Time{}, false, nil
+		}
+		return nil, time.Time{}, false, fmt.Errorf("catalog: reading cached offers: %w", err)
+	}
+	createdAt, err = time.Parse(time.RFC3339, createdAtStr)
+	if err != nil {
+		return nil, time.Time{}, false, fmt.Errorf("catalog: parsing cached created_at: %w", err)
+	}
+	if time.Since(createdAt) > maxAge {
+		return nil, time.Time{}, false, nil
+	}
+	return []byte(json), createdAt, true, nil
+}
+
+// SaveOffersCache records one live scrape's raw offers for future
+// CachedOffers reads. offersJSON is the caller's own JSON encoding of
+// the offers slice — this package doesn't depend on googleflights, so it
+// stores the bytes opaquely rather than the typed offers.
+func (s *SQLite) SaveOffersCache(ctx context.Context, origin, destination, departDate, returnDate, source string, offersJSON []byte, createdAt time.Time) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO flight_offers_cache (origin, destination, depart_date, return_date, source, offers_json, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		origin, destination, departDate, returnDate, source, string(offersJSON), createdAt.UTC().Format(time.RFC3339))
+	if err != nil {
+		return fmt.Errorf("catalog: saving offers cache: %w", err)
+	}
+	return nil
 }
 
 // SaveRouteSearchPlan upserts one route-search audit-trail row (see
