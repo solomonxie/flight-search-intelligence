@@ -11,8 +11,8 @@ import (
 )
 
 // offersCacheFreshness is how old a cached scrape can be and still be
-// served instead of a live re-scrape — the "within the last hour" window.
-const offersCacheFreshness = time.Hour
+// served instead of a live re-scrape.
+const offersCacheFreshness = 24 * time.Hour
 
 // searchOffers is the cache-first front door every routesearch query goes
 // through instead of calling deps.Flights.SearchFlightOffers directly: a
