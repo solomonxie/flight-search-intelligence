@@ -18,13 +18,13 @@ The top-level "Spec" is always the current, up-to-date state — a follow-up may
 
 Choose exactly one action:
   "dispatch": run one more search with a new set of concrete arguments. On round 1 (no rounds yet), dispatch using the Spec's concrete fields exactly as given — it already carries sensible values/defaults. On a retry, adjust arguments based on what the last round's result showed (e.g. raise QueryBudget or MaxHours to see more of the search frontier, tighten MaxPrice, etc). Origin/Destination may be a plain city name rather than an IATA code (e.g. "Beijing", not "PEK") — that's expected for a multi-airport city, not a gap to fill in yourself: pass it through unchanged, the dispatched search resolves it into every airport that city has and keeps the cheapest, so never invent or guess a specific airport code the Spec didn't already give you.
-  "ask_user": the request is genuinely underspecified — e.g. no departure date and nothing implying a date range, or a place name that isn't recognizable as any real city or airport — not just "could be narrower." Set "Question" to one message covering every unresolved thing at once (e.g. "What's your departure date, and where are you flying from?") — never ask about just one gap and save the rest for a later round; each round is a full round-trip with the traveler, so collect everything you need in it. Spec.Notes explains *why* a field is blank (e.g. an unresolved date range) — when a note exists for a blank field, ask about that note's specifics instead of a generic re-ask; a generic re-ask of a question the traveler already answered reads as the agent having ignored them.
+  "ask_user": the request is genuinely underspecified — e.g. no departure date and nothing implying a date range, TripType still unknown (see below — this is common, don't skip it), or a place name that isn't recognizable as any real city or airport — not just "could be narrower." Set "Question" to one message covering every unresolved thing at once (e.g. "What's your departure date, and is this one-way or round-trip?") — never ask about just one gap and save the rest for a later round; each round is a full round-trip with the traveler, so collect everything you need in it. Spec.Notes explains *why* a field is blank (e.g. an unresolved date range) — when a note exists for a blank field, ask about that note's specifics instead of a generic re-ask; a generic re-ask of a question the traveler already answered reads as the agent having ignored them.
   "finalize": stop and hand back what's been found, or an honest "didn't find one that fits" if nothing qualifies.
 Never choose "defer" — it exists in the type system but isn't wired to anything in this build.
 
 Judge each round's result against BOTH halves of the spec: concrete fields are already enforced by the search itself (never re-check those — a result violating MaxHours/MaxPrice simply won't appear), but SoftConstraints are plain language only you can judge — e.g. "no self-transfer / separate tickets" is violated by any result with SelfTransfer:true. A result violating a soft constraint is NOT "good enough," even if it's the only or cheapest option found: dispatch again with adjusted arguments instead of finalizing, unless you're genuinely out of ideas for how to adjust — then finalize, and say plainly in Reasoning that a soft constraint went unmet.
 
-For "dispatch", "Request" must be a JSON object with these fields (Go field names, exactly): Origin, Destination, DepartDate, ReturnDate (YYYY-MM-DD; "" = one-way), MaxHours (float), QueryBudget (int), MaxPrice (int USD, 0 = no cap), MinLayoverMinutes, MaxLayoverMinutes (int minutes), SearchRadiusKm (float; only matters when Origin/Destination is a city name, not a specific airport).
+For "dispatch", "Request" must be a JSON object with these fields (Go field names, exactly): Origin, Destination, TripType ("one_way" or "round_trip" — must already be resolved, never ""), DepartDate, ReturnDate (YYYY-MM-DD; only set when TripType is "round_trip"), MaxHours (float), QueryBudget (int), MaxPrice (int USD, 0 = no cap), MinLayoverMinutes, MaxLayoverMinutes (int minutes), SearchRadiusKm (float; only matters when Origin/Destination is a city name, not a specific airport).
 
 Reply with EXACTLY one JSON object, no prose outside it, no markdown fences:
 {"Action": "dispatch"|"ask_user"|"finalize", "Request": {...only for dispatch...}, "Question": "...only for ask_user...", "Reasoning": "one or two sentences, always present"}`
@@ -138,13 +138,17 @@ func overrideBogusStop(spec Spec, rounds []RoundRecord, round int, from string) 
 	return decision, true
 }
 
-// missingRequiredFields reports every one of Origin/Destination/DepartDate
-// still blank in req, in the order a person would naturally be asked for
-// them — nil if all three are set (the only fields routesearch.Search
-// cannot proceed without at all; MaxHours/QueryBudget etc. always carry a
-// usable value via fillDispatchDefaults). Collecting all of them, rather
-// than just the first, lets the caller ask one combined question instead
-// of burning a round per missing field.
+// missingRequiredFields reports every one of Origin/Destination/TripType/
+// DepartDate(/ReturnDate) still unresolved in req, in the order a person
+// would naturally be asked for them — nil once all are set (the only
+// fields routesearch.Search cannot proceed without at all, TripType
+// included: a blank ReturnDate is otherwise indistinguishable from "not
+// asked yet" and a live run once silently searched one-way, only saying
+// so after the fact, when the traveler was never actually asked which
+// they meant). MaxHours/QueryBudget etc. always carry a usable value via
+// fillDispatchDefaults, so they're not checked here. Collecting all of
+// them, rather than just the first, lets the caller ask one combined
+// question instead of burning a round per missing field.
 func missingRequiredFields(req CollectRouteRequest) []string {
 	var missing []string
 	if req.Origin == "" {
@@ -155,6 +159,14 @@ func missingRequiredFields(req CollectRouteRequest) []string {
 	}
 	if req.DepartDate == "" {
 		missing = append(missing, "your departure date")
+	}
+	switch req.TripType {
+	case "":
+		missing = append(missing, "whether this is one-way or round-trip")
+	case "round_trip":
+		if req.ReturnDate == "" {
+			missing = append(missing, "your return date")
+		}
 	}
 	return missing
 }
@@ -196,12 +208,15 @@ func specAndRoundsJSON(spec Spec, rounds []RoundRecord) string {
 	return string(b)
 }
 
-// fillDispatchDefaults treats a zeroed numeric field in the model's reply
-// as "keep whatever was already in force," not "set it to zero" — a
-// small local model sometimes omits a field the prompt asked for, and a
+// fillDispatchDefaults treats a zeroed field in the model's reply as
+// "keep whatever was already in force," not "set it to zero" — a small
+// local model sometimes omits a field the prompt asked for, and a
 // silently zeroed MaxHours would make every offer infeasible. Falls back
 // to the previous round's dispatched args, or the spec's own fields on
-// round 1. ReturnDate is exempt: "" legitimately means one-way.
+// round 1. TripType/ReturnDate carry forward like everything else here —
+// "" is never a legitimate resolved value for TripType (missingRequiredFields
+// catches a genuinely blank one before dispatch is ever reached), so
+// there's no case where forward-filling it from a prior round is wrong.
 func fillDispatchDefaults(req CollectRouteRequest, spec Spec, rounds []RoundRecord) CollectRouteRequest {
 	fallback := spec.toCollectRouteRequest()
 	if len(rounds) > 0 {
@@ -213,8 +228,14 @@ func fillDispatchDefaults(req CollectRouteRequest, spec Spec, rounds []RoundReco
 	if req.Destination == "" {
 		req.Destination = fallback.Destination
 	}
+	if req.TripType == "" {
+		req.TripType = fallback.TripType
+	}
 	if req.DepartDate == "" {
 		req.DepartDate = fallback.DepartDate
+	}
+	if req.ReturnDate == "" {
+		req.ReturnDate = fallback.ReturnDate
 	}
 	if req.MaxHours == 0 {
 		req.MaxHours = fallback.MaxHours
@@ -245,8 +266,8 @@ const draftFinalEmailSystemPrompt = `You write the final reply to a traveler who
 Write the literal reply text — plain prose, no markdown, a few sentences, no filler ("I hope this helps," restating the whole Spec back at them):
   - Lead with the outcome: the best itinerary's price, duration, route, and whether it's one ticket or self-transfer (call out the self-transfer risk plainly — no through checked bags, no rebooking if the first leg is delayed) — or an honest "didn't find one that fits" if every round came back empty.
   - Check the last round's Reasoning for an unmet soft constraint; if there is one, say plainly that it wasn't satisfied rather than presenting the result as fully matching what was asked.
-  - Proactively flag anything the Spec left ambiguous instead of silently assuming it — most importantly, a blank ReturnDate was treated as one-way: say so, and invite a return date if that's not what they meant.
   - MaxPrice 0 means no price cap was set — never describe it as "a $0 budget" or similar; only mention MaxPrice at all when it's nonzero.
+  - If Spec.TripType is "round_trip": say plainly that only the outbound flight was searched — this build's search doesn't book or price a return leg yet, whatever ReturnDate says — and that ReturnDate is recorded but not yet acted on. Never present the result as a round-trip fare or itinerary.
 
 Reply with EXACTLY one JSON object, no prose outside it, no markdown fences:
 {"Email": "the final reply, plain prose"}`
