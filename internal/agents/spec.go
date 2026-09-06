@@ -15,7 +15,19 @@ type Spec struct {
 	MaxPrice          int // USD hard ceiling on the whole trip; 0 = no cap
 	MinLayoverMinutes int
 	MaxLayoverMinutes int
-	SoftConstraints   []string
+	// SearchRadiusKm: how far around a named city's center to look for
+	// alternate airports when Origin/Destination is a city rather than
+	// one specific airport (see dispatch.resolveAirports) — e.g.
+	// "Vancouver" within the default 100km also considers Abbotsford.
+	// Meaningless when the field already names a specific airport.
+	SearchRadiusKm  float64
+	SoftConstraints []string
+	// Notes carries forward *why* FormSpec left a field blank or unresolved
+	// (e.g. "Beijing has multiple airports (PEK/PKX), none specified") —
+	// info that would otherwise vanish once FormSpec returns just the
+	// blank field itself, leaving DecideNextAction unable to ask anything
+	// sharper than a generic "what's your destination?" on every retry.
+	Notes []string
 }
 
 // toCollectRouteRequest is the spec's own view as a dispatch argument
@@ -25,6 +37,7 @@ func (s Spec) toCollectRouteRequest() CollectRouteRequest {
 		Origin: s.Origin, Destination: s.Destination, DepartDate: s.DepartDate, ReturnDate: s.ReturnDate,
 		MaxHours: s.MaxHours, QueryBudget: s.QueryBudget, MaxPrice: s.MaxPrice,
 		MinLayoverMinutes: s.MinLayoverMinutes, MaxLayoverMinutes: s.MaxLayoverMinutes,
+		SearchRadiusKm: s.SearchRadiusKm,
 	}
 }
 
