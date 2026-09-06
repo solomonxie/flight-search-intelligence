@@ -33,6 +33,9 @@ dry-run-best-routes:
 dry-run-route-search-full:
 	go run ./cmd/routesearch -origin $(ORIGIN) -destination $(DEST) -date $(DATE) -return-date $(RETURN)
 
+dry-run-agent-interactive:
+	go run ./cmd/email-intake -interactive
+
 kafka-topics:
 	kafka-topics --bootstrap-server localhost:9092 --create --if-not-exists --topic agent-decisions --partitions 3 --replication-factor 1
 	kafka-topics --bootstrap-server localhost:9092 --create --if-not-exists --topic search-tasks --partitions 3 --replication-factor 1
@@ -52,9 +55,6 @@ run-email-intake-start:
 
 run-email-intake-signal:
 	go run ./cmd/email-intake -signal -request-id $(REQUEST_ID) -text "$(TEXT)"
-
-dry-run-agent-interactive:
-	go run ./cmd/email-intake -interactive
 
 test:
 	go test ./...

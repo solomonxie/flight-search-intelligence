@@ -34,6 +34,14 @@ func (c *OllamaClient) Chat(ctx context.Context, systemPrompt, userPrompt string
 		},
 		"stream": false,
 		"format": "json",
+		// See openai.go's Chat: structured extraction/decision-making,
+		// not creative writing — near-zero temperature cuts run-to-run
+		// variance on identical input.
+		"options": map[string]any{"temperature": 0.1},
+		// qwen3 is a hybrid thinking model — "think": true turns on its
+		// chain-of-thought pass before the final JSON reply (a no-op,
+		// not an error, on a model that doesn't support it).
+		"think": true,
 	})
 	if err != nil {
 		return "", fmt.Errorf("agents: encoding ollama request: %w", err)

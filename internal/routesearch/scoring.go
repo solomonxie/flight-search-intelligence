@@ -110,6 +110,17 @@ func paretoInsert(results []Result, r Result) []Result {
 	return append(kept, r)
 }
 
+// MergeResults pareto-merges b into a, one entry at a time — how a
+// multi-airport-city request (see dispatch.runSearch) folds each
+// candidate airport's own Pareto set into one combined set spanning
+// every airport searched.
+func MergeResults(a, b []Result) []Result {
+	for _, r := range b {
+		a = paretoInsert(a, r)
+	}
+	return a
+}
+
 // cheapestResult returns the lowest-price entry in a non-empty Pareto set.
 func cheapestResult(results []Result) *Result {
 	best := results[0]
