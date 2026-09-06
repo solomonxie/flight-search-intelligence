@@ -2,13 +2,13 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
 
-	"flight-search-intelligence/internal/agents"
 	"flight-search-intelligence/internal/catalog"
+	"flight-search-intelligence/internal/common"
+	"flight-search-intelligence/internal/dispatch"
 	"flight-search-intelligence/internal/googleflights"
 	"flight-search-intelligence/internal/kafka"
 	"flight-search-intelligence/internal/openflights"
@@ -37,7 +37,7 @@ func runWorker(dbPath, openflightsDir string, brokers []string, concurrency int)
 		Flights: googleflights.NewClient(),
 		Graph:   graph,
 		Catalog: db,
-		Logger:  slog.New(slog.NewJSONHandler(os.Stdout, nil)),
+		Logger:  slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: common.LogLevel()})),
 	}
 
 	consumer := kafka.NewConsumer(brokers, kafka.TopicSearchTasks, "collector")
@@ -69,40 +69,18 @@ func runWorker(dbPath, openflightsDir string, brokers []string, concurrency int)
 }
 
 // runTask executes one task (a real, possibly slow scrape — see
-// internal/routesearch's own pacing), saves its result, and — regardless
-// of success or failure — pushes the request's next DecisionTrigger so
-// the agent loop always hears back, never stalls on a failed task.
+// internal/routesearch's own pacing) via internal/dispatch.RunTask —
+// shared with cmd/email-intake -interactive's synchronous, no-Kafka
+// path — and, regardless of success or failure, pushes the request's
+// next DecisionTrigger so the agent loop always hears back, never stalls
+// on a failed task.
 func runTask(ctx context.Context, db *catalog.SQLite, deps routesearch.Deps, producer *kafka.Producer, taskID string) {
-	task, err := db.GetAgentTask(ctx, taskID)
+	requestID, err := dispatch.RunTask(ctx, db, deps, taskID)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "collector: loading task %s: %v\n", taskID, err)
-		return
-	}
-
-	var req agents.CollectRouteRequest
-	if err := json.Unmarshal([]byte(task.ParamsJSON), &req); err != nil {
-		saveFailure(ctx, db, taskID, fmt.Errorf("decoding task params: %w", err))
-	} else if result, err := fetchFare(ctx, deps, req); err != nil {
-		saveFailure(ctx, db, taskID, err)
-	} else if resultJSON, err := json.Marshal(result); err != nil {
-		saveFailure(ctx, db, taskID, fmt.Errorf("encoding result: %w", err))
-	} else if err := db.SaveAgentTaskResult(ctx, taskID, "done", resultJSON, ""); err != nil {
-		fmt.Fprintln(os.Stderr, "collector: saving task result:", err)
-	}
-
-	requestID, err := agents.RecordTaskResult(ctx, db, taskID)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "collector: recording result for %s: %v\n", taskID, err)
+		fmt.Fprintf(os.Stderr, "collector: running task %s: %v\n", taskID, err)
 		return
 	}
 	if err := producer.Send(ctx, requestID, kafka.DecisionTrigger{RequestID: requestID}); err != nil {
 		fmt.Fprintf(os.Stderr, "collector: publishing decision trigger for %s: %v\n", requestID, err)
-	}
-}
-
-func saveFailure(ctx context.Context, db *catalog.SQLite, taskID string, err error) {
-	fmt.Fprintf(os.Stderr, "collector: task %s failed: %v\n", taskID, err)
-	if saveErr := db.SaveAgentTaskResult(ctx, taskID, "failed", nil, err.Error()); saveErr != nil {
-		fmt.Fprintln(os.Stderr, "collector: saving task failure:", saveErr)
 	}
 }

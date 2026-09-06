@@ -1,6 +1,6 @@
 .PHONY: build db-init run-collector run-search-api dry-run-best-dates dry-run-best-routes \
 	dry-run-route-search-full run-email-intake-start run-email-intake-signal \
-	run-collector-worker run-agent-worker kafka-topics test
+	dry-run-agent-interactive run-collector-worker run-agent-worker kafka-topics test
 
 build:
 	go build ./...
@@ -44,13 +44,17 @@ run-agent-worker:
 	go run ./cmd/agent-worker
 
 REQUEST_ID ?=
+REQUEST_TEXT ?= Fly $(ORIGIN) to $(DEST) on $(DATE), one way
 TEXT ?= must be there for Christmas
 
 run-email-intake-start:
-	go run ./cmd/email-intake -start -origin $(ORIGIN) -destination $(DEST) -date $(DATE) -return-date $(RETURN)
+	go run ./cmd/email-intake -start -text "$(REQUEST_TEXT)"
 
 run-email-intake-signal:
 	go run ./cmd/email-intake -signal -request-id $(REQUEST_ID) -text "$(TEXT)"
+
+dry-run-agent-interactive:
+	go run ./cmd/email-intake -interactive
 
 test:
 	go test ./...
