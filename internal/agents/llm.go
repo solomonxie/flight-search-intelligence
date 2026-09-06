@@ -26,12 +26,12 @@ type LLMClient interface {
 // compile-time branch.
 //
 //	LLM_BACKEND: "ollama" (default) | "openai"
-//	OLLAMA_URL (default http://localhost:11434), OLLAMA_MODEL (default qwen2.5:7b)
+//	OLLAMA_URL (default http://localhost:11434), OLLAMA_MODEL (default qwen3:8b)
 //	OPENAI_API_KEY (required for openai), OPENAI_MODEL (default gpt-4o-mini)
 func NewLLMClientFromEnv() (LLMClient, error) {
 	switch backend := envOrDefault("LLM_BACKEND", "ollama"); backend {
 	case "ollama":
-		return NewOllamaClient(envOrDefault("OLLAMA_URL", "http://localhost:11434"), envOrDefault("OLLAMA_MODEL", "qwen2.5:7b")), nil
+		return NewOllamaClient(envOrDefault("OLLAMA_URL", "http://localhost:11434"), envOrDefault("OLLAMA_MODEL", "qwen3:8b")), nil
 	case "openai":
 		key := os.Getenv("OPENAI_API_KEY")
 		if key == "" {

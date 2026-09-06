@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // decideSystemPrompt is DESIGN.md "Agent loop" steps 2 and 4-5: choose
@@ -13,9 +14,11 @@ import (
 // express.
 const decideSystemPrompt = `You are the decision step of a flight-search agent loop. You are given the current Spec (concrete fields plus a plain-language SoftConstraints list) and every round dispatched so far, each with the arguments used and — once it ran — its result (a list of offers, each with PriceUSD, DurationMinutes, Path, and SelfTransfer).
 
+The top-level "Spec" is always the current, up-to-date state — a follow-up may have filled in a field since an earlier round ran. Each entry in "RoundsSoFar" also carries its own "Spec" snapshot, but that's what the spec looked like *at that round*, not now: if round 1's snapshot shows Origin blank but the top-level Spec shows Origin set, the origin is known — do not re-ask a question an earlier round already asked if the top-level Spec now answers it.
+
 Choose exactly one action:
   "dispatch": run one more search with a new set of concrete arguments. On round 1 (no rounds yet), dispatch using the Spec's concrete fields exactly as given — it already carries sensible values/defaults. On a retry, adjust arguments based on what the last round's result showed (e.g. raise QueryBudget or MaxHours to see more of the search frontier, tighten MaxPrice, etc).
-  "ask_user": the request is genuinely underspecified — e.g. no departure date and nothing implying a date range, or an origin/destination too ambiguous to search — not just "could be narrower." Set "Question" to one clear clarifying question.
+  "ask_user": the request is genuinely underspecified — e.g. no departure date and nothing implying a date range, or an origin/destination too ambiguous to search — not just "could be narrower." Set "Question" to one message covering every unresolved thing at once (e.g. "What's your departure date, and which Tokyo airport — NRT or HND?") — never ask about just one gap and save the rest for a later round; each round is a full round-trip with the traveler, so collect everything you need in it.
   "finalize": stop and hand back what's been found, or an honest "didn't find one that fits" if nothing qualifies.
 Never choose "defer" — it exists in the type system but isn't wired to anything in this build.
 
@@ -28,14 +31,15 @@ Reply with EXACTLY one JSON object, no prose outside it, no markdown fences:
 
 // DecideNextAction is DESIGN.md's agent-loop step 2, judgment call made
 // by a real LLMClient call (replacing the earlier deterministic stub —
-// see IMPLEMENTATION_PLAN.md Phase 2). Prints the full prompt/reply so
-// whichever process calls this (cmd/agent-worker) shows the live
-// decision transcript in its own terminal.
+// see IMPLEMENTATION_PLAN.md Phase 2). Logs the full prompt/reply at
+// Debug (LOG_LEVEL=debug — see log.go) and a one-line summary at Info,
+// so the live decision is always visible without always showing the
+// whole prompt behind it.
 func DecideNextAction(ctx context.Context, llm LLMClient, spec Spec, rounds []RoundRecord) (Decision, error) {
+	round := len(rounds) + 1
 	user := decideUserPrompt(spec, rounds)
 	raw, err := llm.Chat(ctx, decideSystemPrompt, user)
-	fmt.Printf("\n=== agents.DecideNextAction: LLM call (round %d) ===\n--- system ---\n%s\n--- user ---\n%s\n--- raw reply ---\n%s\n=====================================================\n\n",
-		len(rounds)+1, decideSystemPrompt, user, raw)
+	debugLog.Debug("DecideNextAction LLM call", "round", round, "system", decideSystemPrompt, "user", user, "raw_reply", raw)
 	if err != nil {
 		return Decision{}, fmt.Errorf("agents: LLM decide call: %w", err)
 	}
@@ -55,19 +59,120 @@ func DecideNextAction(ctx context.Context, llm LLMClient, spec Spec, rounds []Ro
 		if reply.Request == nil {
 			return Decision{}, fmt.Errorf("agents: LLM chose dispatch with no Request (raw reply: %s)", raw)
 		}
-		return Decision{Action: ActionDispatch, Request: fillDispatchDefaults(*reply.Request, spec, rounds), Reasoning: reply.Reasoning}, nil
+		req := fillDispatchDefaults(*reply.Request, spec, rounds)
+		// Whether Origin/Destination/DepartDate are set is mechanical,
+		// not a judgment call — routesearch.Search cannot run without
+		// them, so this is enforced here in Go rather than left to the
+		// model to always remember (it doesn't always: a live run
+		// dispatched twice with DepartDate still blank, burning two of
+		// three redispatch rounds on a search that could never
+		// succeed, before a third round finally asked for the date).
+		if missing := missingRequiredFields(req); len(missing) > 0 {
+			decision := Decision{
+				Action:    ActionAskUser,
+				Question:  "What is " + joinMissing(missing) + "?",
+				Reasoning: fmt.Sprintf("chose dispatch, but %s still missing — a search can't run without them, so this asks for all of them in one round instead of spending a round per field on a request that can't succeed", joinMissing(missing)),
+			}
+			debugLog.Info("decided", "round", round, "action", decision.Action, "reasoning", decision.Reasoning, "overridden_from", "dispatch")
+			return decision, nil
+		}
+		decision := Decision{Action: ActionDispatch, Request: req, Reasoning: reply.Reasoning}
+		debugLog.Info("decided", "round", round, "action", decision.Action, "reasoning", decision.Reasoning)
+		return decision, nil
 	case ActionAskUser:
-		return Decision{Action: ActionAskUser, Question: reply.Question, Reasoning: reply.Reasoning}, nil
+		if decision, ok := overrideBogusStop(spec, rounds, round, "ask_user"); ok {
+			return decision, nil
+		}
+		decision := Decision{Action: ActionAskUser, Question: reply.Question, Reasoning: reply.Reasoning}
+		debugLog.Info("decided", "round", round, "action", decision.Action, "reasoning", decision.Reasoning)
+		return decision, nil
 	case ActionFinalize:
-		return Decision{Action: ActionFinalize, Reasoning: reply.Reasoning}, nil
+		if decision, ok := overrideBogusStop(spec, rounds, round, "finalize"); ok {
+			return decision, nil
+		}
+		decision := Decision{Action: ActionFinalize, Reasoning: reply.Reasoning}
+		debugLog.Info("decided", "round", round, "action", decision.Action, "reasoning", decision.Reasoning)
+		return decision, nil
 	default:
 		return Decision{}, fmt.Errorf("agents: LLM returned unknown action %q (raw reply: %s)", reply.Action, raw)
+	}
+}
+
+// overrideBogusStop catches the mirror-image mistake to the dispatch-side
+// guard above: the model choosing ask_user or finalize while the
+// top-level Spec already has everything routesearch.Search needs and
+// nothing has ever actually been dispatched — always wrong, since there's
+// no legitimate reason to stop (for more info, or for a result) before
+// even trying the search once. decideSystemPrompt already tells the model
+// the top-level Spec is authoritative over a stale round snapshot, but a
+// live run still finalized claiming "origin and departure date were not
+// specified" when both were set and round 1 had only ever asked a
+// question — never dispatched. Mechanical, not a judgment call, so
+// enforced here rather than trusted to the model.
+func overrideBogusStop(spec Spec, rounds []RoundRecord, round int, from string) (Decision, bool) {
+	req := spec.toCollectRouteRequest()
+	if len(missingRequiredFields(req)) > 0 {
+		return Decision{}, false
+	}
+	for _, r := range rounds {
+		if r.TaskID != "" {
+			return Decision{}, false // a search has actually run before; the model's call to make
+		}
+	}
+	decision := Decision{
+		Action:    ActionDispatch,
+		Request:   fillDispatchDefaults(req, spec, rounds),
+		Reasoning: fmt.Sprintf("overriding %s: Spec already has origin/destination/depart date and no search has run yet", from),
+	}
+	debugLog.Info("decided", "round", round, "action", decision.Action, "reasoning", decision.Reasoning, "overridden_from", from)
+	return decision, true
+}
+
+// missingRequiredFields reports every one of Origin/Destination/DepartDate
+// still blank in req, in the order a person would naturally be asked for
+// them — nil if all three are set (the only fields routesearch.Search
+// cannot proceed without at all; MaxHours/QueryBudget etc. always carry a
+// usable value via fillDispatchDefaults). Collecting all of them, rather
+// than just the first, lets the caller ask one combined question instead
+// of burning a round per missing field.
+func missingRequiredFields(req CollectRouteRequest) []string {
+	var missing []string
+	if req.Origin == "" {
+		missing = append(missing, "your departure airport")
+	}
+	if req.Destination == "" {
+		missing = append(missing, "your destination airport")
+	}
+	if req.DepartDate == "" {
+		missing = append(missing, "your departure date")
+	}
+	return missing
+}
+
+// joinMissing renders missing fields as "a", "a and b", or "a, b, and c" —
+// one combined phrase to ask in a single question rather than one per
+// field.
+func joinMissing(missing []string) string {
+	switch len(missing) {
+	case 1:
+		return missing[0]
+	case 2:
+		return missing[0] + " and " + missing[1]
+	default:
+		return strings.Join(missing[:len(missing)-1], ", ") + ", and " + missing[len(missing)-1]
 	}
 }
 
 // decideUserPrompt renders the spec plus round history as the JSON the
 // system prompt tells the model to expect.
 func decideUserPrompt(spec Spec, rounds []RoundRecord) string {
+	return "Decide the next action for this request:\n\n" + specAndRoundsJSON(spec, rounds)
+}
+
+// specAndRoundsJSON renders spec + round history as the JSON both
+// DecideNextAction and DraftFinalEmail hand the LLM as "the current state
+// of this request."
+func specAndRoundsJSON(spec Spec, rounds []RoundRecord) string {
 	view := struct {
 		Spec        Spec
 		RoundsSoFar []RoundRecord
@@ -76,9 +181,9 @@ func decideUserPrompt(spec Spec, rounds []RoundRecord) string {
 	if err != nil {
 		// Spec/RoundRecord are always JSON-marshalable Go structs; a
 		// failure here is a programming error, not bad input.
-		panic(fmt.Sprintf("agents: marshaling decide prompt: %v", err))
+		panic(fmt.Sprintf("agents: marshaling spec/rounds: %v", err))
 	}
-	return "Decide the next action for this request:\n\n" + string(b)
+	return string(b)
 }
 
 // fillDispatchDefaults treats a zeroed numeric field in the model's reply
@@ -119,34 +224,38 @@ func fillDispatchDefaults(req CollectRouteRequest, spec Spec, rounds []RoundReco
 	return req
 }
 
-// DraftFinalEmail stands in for the LLM-drafting step DESIGN.md's
-// "Components" section already names. Plain-text template for this first
-// draft — real prose drafting is separate work from the decision core
-// this file exists to prove out.
-func DraftFinalEmail(ctx context.Context, spec Spec, rounds []RoundRecord) (string, error) {
-	var last *RoundRecord
-	for i := len(rounds) - 1; i >= 0; i-- {
-		if rounds[i].Result != nil {
-			last = &rounds[i]
-			break
-		}
+// draftFinalEmailSystemPrompt is DESIGN.md "Components"' LLM-drafting
+// idea: the reply a traveler actually reads once the loop stops, not a
+// re-statement of the Spec.
+const draftFinalEmailSystemPrompt = `You write the final reply to a traveler whose flight-search agent loop just stopped — either it found something worth presenting, or it's giving up honestly without one. You're given the Spec (what was asked for) and every round dispatched so far, each with its arguments, its result once it ran, and the reasoning behind the decision that produced it.
+
+Write the literal reply text — plain prose, no markdown, a few sentences, no filler ("I hope this helps," restating the whole Spec back at them):
+  - Lead with the outcome: the best itinerary's price, duration, route, and whether it's one ticket or self-transfer (call out the self-transfer risk plainly — no through checked bags, no rebooking if the first leg is delayed) — or an honest "didn't find one that fits" if every round came back empty.
+  - Check the last round's Reasoning for an unmet soft constraint; if there is one, say plainly that it wasn't satisfied rather than presenting the result as fully matching what was asked.
+  - Proactively flag anything the Spec left ambiguous instead of silently assuming it — most importantly, a blank ReturnDate was treated as one-way: say so, and invite a return date if that's not what they meant.
+
+Reply with EXACTLY one JSON object, no prose outside it, no markdown fences:
+{"Email": "the final reply, plain prose"}`
+
+// DraftFinalEmail is DESIGN.md's finalize-step LLM call — replacing the
+// earlier fixed Sprintf template, which could only ever restate Spec
+// fields and never actually addressed anything the traveler said (e.g. a
+// follow-up asking why no return date was requested got the same canned
+// price/route sentence back, unchanged).
+func DraftFinalEmail(ctx context.Context, llm LLMClient, spec Spec, rounds []RoundRecord) (string, error) {
+	user := "Write the final reply for this request:\n\n" + specAndRoundsJSON(spec, rounds)
+	raw, err := llm.Chat(ctx, draftFinalEmailSystemPrompt, user)
+	debugLog.Debug("DraftFinalEmail LLM call", "system", draftFinalEmailSystemPrompt, "user", user, "raw_reply", raw)
+	if err != nil {
+		return "", fmt.Errorf("agents: LLM draft-final-email call: %w", err)
 	}
 
-	if last == nil || len(last.Result.Results) == 0 {
-		return fmt.Sprintf(
-			"We searched %s -> %s around %s but didn't find a feasible itinerary within %d round(s). "+
-				"We're being upfront rather than presenting a partial answer as final — happy to keep looking if you can loosen a constraint.",
-			spec.Origin, spec.Destination, spec.DepartDate, len(rounds)), nil
+	var reply struct{ Email string }
+	if err := json.Unmarshal([]byte(raw), &reply); err != nil {
+		return "", fmt.Errorf("agents: parsing LLM final-email reply %q: %w", raw, err)
 	}
-
-	best := last.Result.Results[0]
-	kind := "single-ticket"
-	if best.SelfTransfer {
-		kind = "separate tickets (self-transfer risk: no through checked bags, no rebooking if the first leg is delayed)"
+	if reply.Email == "" {
+		return "", fmt.Errorf("agents: LLM final-email reply had empty Email (raw reply: %s)", raw)
 	}
-	return fmt.Sprintf(
-		"Best option found for %s -> %s around %s: $%.0f, %dh%02dm via %v (%s). Found in %d round(s), %d total quer(y/ies) used.",
-		spec.Origin, spec.Destination, spec.DepartDate, best.PriceUSD,
-		best.DurationMinutes/60, best.DurationMinutes%60, best.Path, kind,
-		len(rounds), last.Result.QueriesUsed), nil
+	return reply.Email, nil
 }

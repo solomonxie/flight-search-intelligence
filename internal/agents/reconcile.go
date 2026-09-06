@@ -122,7 +122,7 @@ func Decide(ctx context.Context, llm LLMClient, db *catalog.SQLite, requestID st
 		finalizedBy = "round_cap"
 	}
 
-	emailBody, err := DraftFinalEmail(ctx, spec, rounds)
+	emailBody, err := DraftFinalEmail(ctx, llm, spec, rounds)
 	if err != nil {
 		return "", false, fmt.Errorf("agents: DraftFinalEmail for %s: %w", requestID, err)
 	}

@@ -69,7 +69,7 @@ func run() error {
 		return fmt.Errorf("origin, destination, and date are required")
 	}
 
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: common.LogLevel()}))
 
 	fmt.Fprintln(os.Stderr, "Loading OpenFlights route graph (downloads once, then cached)...")
 	graph, err := openflights.Load(*openflightsDir)
