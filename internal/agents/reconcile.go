@@ -24,8 +24,27 @@ import (
 )
 
 // RedispatchCap is DESIGN.md's resolved default: "3 rounds before forced
-// finalization."
+// finalization" — 3 actual *search* attempts, per dispatchCount below.
 const RedispatchCap = 3
+
+// dispatchCount is how many of rounds actually ran a search (Action ==
+// ActionDispatch), the only kind RedispatchCap is meant to bound — see
+// its DESIGN.md rationale ("a live run dispatched twice with DepartDate
+// still blank, burning two of three redispatch rounds"). len(rounds)
+// alone would double-count ask_user rounds against the same cap: a live
+// run needing 3 rounds of clarifying questions (origin, then
+// destination, then a date) hit len(rounds)==3 before its first actual
+// dispatch and was forced to finalize having never searched anything —
+// "couldn't find any flights" when no search had ever run.
+func dispatchCount(rounds []RoundRecord) int {
+	n := 0
+	for _, r := range rounds {
+		if r.Decision.Action == ActionDispatch {
+			n++
+		}
+	}
+	return n
+}
 
 // Request status values — agent_requests.status.
 const (
@@ -91,7 +110,7 @@ func Decide(ctx context.Context, llm LLMClient, db *catalog.SQLite, requestID st
 		return "", false, nil
 	}
 
-	if decision.Action == ActionDispatch && len(rounds) < RedispatchCap {
+	if decision.Action == ActionDispatch && dispatchCount(rounds) < RedispatchCap {
 		round := len(rounds) + 1
 		taskID = fmt.Sprintf("%s-round-%d", requestID, round)
 		paramsJSON, err := json.Marshal(decision.Request)
@@ -118,7 +137,7 @@ func Decide(ctx context.Context, llm LLMClient, db *catalog.SQLite, requestID st
 	// No task id, ok=false: cmd/agent-worker pushes nothing further, and
 	// that absence of a next message is the whole "stop" signal.
 	finalizedBy := "satisfied"
-	if decision.Action == ActionDispatch && len(rounds) >= RedispatchCap {
+	if decision.Action == ActionDispatch && dispatchCount(rounds) >= RedispatchCap {
 		finalizedBy = "round_cap"
 	}
 
