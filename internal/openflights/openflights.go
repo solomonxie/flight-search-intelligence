@@ -14,7 +14,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
 )
 
 const (
@@ -25,6 +27,7 @@ const (
 	routesFile   = "routes.dat"
 
 	earthRadiusMiles = 3958.8
+	kmPerMile        = 1.609344
 )
 
 // Airport is the subset of an airports.dat row this package cares about.
@@ -53,6 +56,72 @@ func (g *Graph) Airport(iata string) (Airport, bool) {
 // HasNonstop reports whether some airline flies from directly to.
 func (g *Graph) HasNonstop(from, to string) bool {
 	return g.Routes[from] != nil && g.Routes[from][to]
+}
+
+// AirportsInCity returns every airport's IATA code whose City field
+// case-insensitively matches city — e.g. "Beijing" -> ["PEK", "PKX"].
+// City names collide across countries (there's a London in Ontario and
+// one in Kentucky, not just the UK's), so this keeps only the country
+// with the most matching airports and drops the rest — right for the
+// overwhelmingly common case where the traveler means the famous one,
+// wrong only for someone who actually wants the minor same-named city,
+// which isn't distinguishable from City alone anyway. Sorted for
+// deterministic output; nil if the city isn't in the dataset at all
+// (including because it was actually a metro/city code OpenFlights
+// doesn't use verbatim, e.g. "NYC").
+func (g *Graph) AirportsInCity(city string) []string {
+	byCountry := make(map[string][]string)
+	for iata, a := range g.Airports {
+		if strings.EqualFold(a.City, city) {
+			byCountry[a.Country] = append(byCountry[a.Country], iata)
+		}
+	}
+	var codes []string
+	for _, cc := range byCountry {
+		if len(cc) > len(codes) {
+			codes = cc
+		}
+	}
+	sort.Strings(codes)
+	return codes
+}
+
+// CityCenter is the simple lat/lon average of every airport
+// AirportsInCity finds for city — good enough at city scale to anchor a
+// radius search, not a real geographic centroid. ok=false if the city
+// isn't in the dataset at all.
+func (g *Graph) CityCenter(city string) (lat, lon float64, ok bool) {
+	codes := g.AirportsInCity(city)
+	if len(codes) == 0 {
+		return 0, 0, false
+	}
+	for _, iata := range codes {
+		a := g.Airports[iata]
+		lat += a.Lat
+		lon += a.Lon
+	}
+	n := float64(len(codes))
+	return lat / n, lon / n, true
+}
+
+// AirportsWithinRadiusKm returns every airport within radiusKm
+// (great-circle distance) of (lat, lon) — e.g. every airport near a
+// named city, not just the ones OpenFlights files under that exact City
+// string, so it also picks up a nearby smaller city's own airport (or,
+// for a border city, one across the border) the way a traveler
+// searching "flights to Vancouver" would want considered. Sorted for
+// deterministic output.
+func (g *Graph) AirportsWithinRadiusKm(lat, lon, radiusKm float64) []string {
+	center := Airport{Lat: lat, Lon: lon}
+	radiusMiles := radiusKm / kmPerMile
+	var codes []string
+	for iata, a := range g.Airports {
+		if DistanceMiles(center, a) <= radiusMiles {
+			codes = append(codes, iata)
+		}
+	}
+	sort.Strings(codes)
+	return codes
 }
 
 // CandidateHubs returns every airport h (other than origin/destination)

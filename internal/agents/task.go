@@ -19,6 +19,7 @@ type CollectRouteRequest struct {
 	MaxPrice          int // USD hard ceiling on the whole trip; 0 = no cap
 	MinLayoverMinutes int
 	MaxLayoverMinutes int
+	SearchRadiusKm    float64 // see Spec.SearchRadiusKm
 }
 
 // CollectRouteResult is the structured result a dispatched search returns —

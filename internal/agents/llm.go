@@ -27,7 +27,8 @@ type LLMClient interface {
 //
 //	LLM_BACKEND: "ollama" (default) | "openai"
 //	OLLAMA_URL (default http://localhost:11434), OLLAMA_MODEL (default qwen3:8b)
-//	OPENAI_API_KEY (required for openai), OPENAI_MODEL (default gpt-4o-mini)
+//	OPENAI_API_KEY (required for openai), OPENAI_MODEL (default gpt-4o-mini),
+//	OPENAI_REASONING_EFFORT (gpt-5-family models only; default "high")
 func NewLLMClientFromEnv() (LLMClient, error) {
 	switch backend := envOrDefault("LLM_BACKEND", "ollama"); backend {
 	case "ollama":
@@ -37,7 +38,7 @@ func NewLLMClientFromEnv() (LLMClient, error) {
 		if key == "" {
 			return nil, fmt.Errorf("agents: LLM_BACKEND=openai but OPENAI_API_KEY is not set")
 		}
-		return NewOpenAIClient(key, envOrDefault("OPENAI_MODEL", "gpt-4o-mini")), nil
+		return NewOpenAIClient(key, envOrDefault("OPENAI_MODEL", "gpt-4o-mini"), envOrDefault("OPENAI_REASONING_EFFORT", "high")), nil
 	default:
 		return nil, fmt.Errorf("agents: unknown LLM_BACKEND %q (want \"ollama\" or \"openai\")", backend)
 	}

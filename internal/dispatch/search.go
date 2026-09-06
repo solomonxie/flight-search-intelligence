@@ -16,6 +16,7 @@ import (
 
 	"flight-search-intelligence/internal/agents"
 	"flight-search-intelligence/internal/catalog"
+	"flight-search-intelligence/internal/openflights"
 	"flight-search-intelligence/internal/routesearch"
 )
 
@@ -59,32 +60,64 @@ func RunTask(ctx context.Context, db *catalog.SQLite, deps routesearch.Deps, tas
 }
 
 // runSearch wraps the existing internal/routesearch.Search (one-way,
-// already-built) as the unit RunTask dispatches to. Trims
-// routesearch.Plan down to agents.CollectRouteResult — the full Plan
-// (candidate-by-candidate audit trail) stays in the store via
-// routesearch.Search's own catalog write, not duplicated into the task's
-// result_json.
+// already-built) as the unit RunTask dispatches to. req.Origin/
+// req.Destination may each be a real IATA code or a plain city name
+// (FormSpec fills in a city name rather than guessing when a multi-
+// airport city like Beijing or London is named but no specific airport
+// is) — resolveAirports expands either into the airport(s) to actually
+// search, and a city with N candidates fans out into one
+// routesearch.Search call per candidate, pareto-merged into one combined
+// result set spanning every airport tried. Trims routesearch.Plan down
+// to agents.CollectRouteResult — the full Plan (candidate-by-candidate
+// audit trail) stays in the store via routesearch.Search's own catalog
+// write, not duplicated into the task's result_json; with more than one
+// candidate pair, only the last pair's plan.RequestID survives into
+// CollectRouteResult.RequestID (the catalog holds every pair's own plan
+// under its own request id regardless).
 func runSearch(ctx context.Context, deps routesearch.Deps, req agents.CollectRouteRequest) (agents.CollectRouteResult, error) {
-	plan, err := routesearch.Search(ctx, deps, routesearch.Params{
-		Origin:            req.Origin,
-		Destination:       req.Destination,
-		DepartDate:        req.DepartDate,
-		MaxHours:          req.MaxHours,
-		QueryBudget:       req.QueryBudget,
-		MaxPrice:          req.MaxPrice,
-		MinLayoverMinutes: req.MinLayoverMinutes,
-		MaxLayoverMinutes: req.MaxLayoverMinutes,
-		PricePerMile:      0.08,
-	})
+	radiusKm := req.SearchRadiusKm
+	if radiusKm <= 0 {
+		radiusKm = defaultSearchRadiusKm // FormSpec always sets 100, but guard against an older/zeroed Spec still on file
+	}
+	origins, err := resolveAirports(deps.Graph, req.Origin, radiusKm)
 	if err != nil {
-		return agents.CollectRouteResult{}, err
+		return agents.CollectRouteResult{}, fmt.Errorf("dispatch: resolving origin %q: %w", req.Origin, err)
+	}
+	destinations, err := resolveAirports(deps.Graph, req.Destination, radiusKm)
+	if err != nil {
+		return agents.CollectRouteResult{}, fmt.Errorf("dispatch: resolving destination %q: %w", req.Destination, err)
 	}
 
-	out := agents.CollectRouteResult{
-		RequestID:   plan.RequestID,
-		QueriesUsed: plan.QueriesUsed,
+	out := agents.CollectRouteResult{}
+	var finalResults []routesearch.Result
+	var lastErr error
+	for _, o := range origins {
+		for _, d := range destinations {
+			plan, err := routesearch.Search(ctx, deps, routesearch.Params{
+				Origin:            o,
+				Destination:       d,
+				DepartDate:        req.DepartDate,
+				MaxHours:          req.MaxHours,
+				QueryBudget:       req.QueryBudget,
+				MaxPrice:          req.MaxPrice,
+				MinLayoverMinutes: req.MinLayoverMinutes,
+				MaxLayoverMinutes: req.MaxLayoverMinutes,
+				PricePerMile:      0.08,
+			})
+			if err != nil {
+				lastErr = err // one candidate airport failing shouldn't sink every other candidate
+				continue
+			}
+			out.RequestID = plan.RequestID
+			out.QueriesUsed += plan.QueriesUsed
+			finalResults = routesearch.MergeResults(finalResults, plan.FinalResult)
+		}
 	}
-	for _, r := range plan.FinalResult {
+	if len(finalResults) == 0 && lastErr != nil {
+		return agents.CollectRouteResult{}, fmt.Errorf("dispatch: every origin/destination candidate failed, e.g.: %w", lastErr)
+	}
+
+	for _, r := range finalResults {
 		out.Results = append(out.Results, agents.CollectRouteOffer{
 			PriceUSD:        r.PriceUSD,
 			DurationMinutes: r.DurationMinutes,
@@ -93,4 +126,30 @@ func runSearch(ctx context.Context, deps routesearch.Deps, req agents.CollectRou
 		})
 	}
 	return out, nil
+}
+
+// defaultSearchRadiusKm mirrors formSpecSystemPromptTemplate's own
+// documented default — kept here too since a Spec predating this field
+// (or a bug upstream) could still hand runSearch a zero.
+const defaultSearchRadiusKm = 100
+
+// resolveAirports turns one Origin/Destination field into the airport(s)
+// to actually search: itself alone, if it's already a real IATA code —
+// naming one specific airport pins the search there, no radius fan-out —
+// else every airport within radiusKm of that city's center, so a city
+// with several airports (or a smaller one nearby) all get tried, not
+// just whichever OpenFlights happens to file under that exact city name.
+func resolveAirports(graph *openflights.Graph, field string, radiusKm float64) ([]string, error) {
+	if _, ok := graph.Airport(field); ok {
+		return []string{field}, nil
+	}
+	lat, lon, ok := graph.CityCenter(field)
+	if !ok {
+		return nil, fmt.Errorf("not a known airport code or city: %q", field)
+	}
+	codes := graph.AirportsWithinRadiusKm(lat, lon, radiusKm)
+	if len(codes) == 0 {
+		return nil, fmt.Errorf("no airports found within %gkm of %q", radiusKm, field)
+	}
+	return codes, nil
 }
