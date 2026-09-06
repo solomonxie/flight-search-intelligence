@@ -6,8 +6,12 @@ package agents
 // "the second list doesn't become new Go fields; it stays something only
 // the agent reads").
 type Spec struct {
-	Origin            string
-	Destination       string
+	Origin      string
+	Destination string
+	// TripType is "one_way", "round_trip", or "" (not yet known — a
+	// blank ReturnDate alone must never be silently read as "one-way";
+	// see missingRequiredFields, which asks explicitly instead).
+	TripType          string
 	DepartDate        string
 	ReturnDate        string
 	MaxHours          float64
@@ -34,7 +38,7 @@ type Spec struct {
 // set — what round 1 (no prior round to copy instead) dispatches with.
 func (s Spec) toCollectRouteRequest() CollectRouteRequest {
 	return CollectRouteRequest{
-		Origin: s.Origin, Destination: s.Destination, DepartDate: s.DepartDate, ReturnDate: s.ReturnDate,
+		Origin: s.Origin, Destination: s.Destination, TripType: s.TripType, DepartDate: s.DepartDate, ReturnDate: s.ReturnDate,
 		MaxHours: s.MaxHours, QueryBudget: s.QueryBudget, MaxPrice: s.MaxPrice,
 		MinLayoverMinutes: s.MinLayoverMinutes, MaxLayoverMinutes: s.MaxLayoverMinutes,
 		SearchRadiusKm: s.SearchRadiusKm,

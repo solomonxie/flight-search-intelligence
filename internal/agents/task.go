@@ -12,6 +12,7 @@ package agents
 type CollectRouteRequest struct {
 	Origin            string
 	Destination       string
+	TripType          string // "one_way" | "round_trip" | "" (unresolved) — see Spec.TripType; not yet passed to routesearch.Params, which is one-way only for now
 	DepartDate        string
 	ReturnDate        string
 	MaxHours          float64
