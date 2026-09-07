@@ -45,7 +45,7 @@ func run() error {
 	returnDate := flag.String("return-date", "", "return date, YYYY-MM-DD — triggers round-trip mode (bundled-fare vs. summed-one-ways comparison)")
 	maxHours := flag.Float64("max-hours", 30, "max tolerable total elapsed trip time, in hours")
 	budget := flag.Int("budget", 20, "max number of hub-search scrapes to spend per direction")
-	minLayover := flag.Int("min-layover-minutes", 45, "minimum feasible layover, in minutes")
+	minLayover := flag.Int("min-layover-minutes", 120, "minimum feasible layover, in minutes")
 	maxLayover := flag.Int("max-layover-minutes", 12*60, "maximum feasible layover, in minutes (raise this + -max-hours for a deliberate multi-day stopover)")
 	pricePerMile := flag.Float64("price-per-mile", 0.08, "fallback $/mile prior used when no cached price exists yet")
 	delay := flag.Duration("delay", 3*time.Second, "pacing delay between scrapes (stand-in for Temporal's durable timer)")

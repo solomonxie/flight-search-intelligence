@@ -24,6 +24,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -277,6 +278,36 @@ func TestAgentLoop_FlexibleDates(t *testing.T) {
 	}
 	if chosenDate == "" {
 		t.Error("no round reported a ChosenDepartDate — the flexible search never recorded which date in the window won")
+	}
+}
+
+// --- Case: "next <month>" must roll to next year when that month has
+// already happened this year — a live run had "next jan" (asked in
+// September) resolve to *this* January, landing ReturnDate almost a
+// year before DepartDate; the bad request still dispatched (every
+// multi-airport candidate pair, both directions — dozens of wasted
+// queries) before finalizing a literally backwards "round trip." Uses
+// the current month's own name, which is always unambiguous regardless
+// of what month tests happen to run in: this year's occurrence of the
+// current month has already happened (or is happening now), so "next
+// <current month>" can only mean next year's.
+
+func TestAgentLoop_NextMonthCrossesYearBoundary(t *testing.T) {
+	h := newHarness(t)
+	thisYear := time.Now().Year()
+	monthName := time.Now().Month().String()
+	row := h.turn("round trip from YVR to PEK, depart next " + monthName + ", return a week later")
+
+	spec := h.spec(row)
+	if spec.DepartDate == "" {
+		t.Fatalf("DepartDate never got resolved: %+v (email: %s)", spec, row.EmailBody.String)
+	}
+	departYear := spec.DepartDate[:4]
+	if departYear == fmt.Sprint(thisYear) {
+		t.Errorf("DepartDate = %q, want next year (%d) — %q this year has already happened/is happening now", spec.DepartDate, thisYear+1, monthName)
+	}
+	if spec.ReturnDate != "" && spec.ReturnDate <= spec.DepartDate {
+		t.Errorf("ReturnDate %q is not after DepartDate %q", spec.ReturnDate, spec.DepartDate)
 	}
 }
 
