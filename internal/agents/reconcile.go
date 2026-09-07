@@ -145,6 +145,13 @@ func Decide(ctx context.Context, llm LLMClient, db *catalog.SQLite, requestID st
 	if err != nil {
 		return "", false, fmt.Errorf("agents: DraftFinalEmail for %s: %w", requestID, err)
 	}
+	// Appended mechanically, not left to the model: a URL is exactly the
+	// kind of thing an LLM sometimes mangles reproducing verbatim, and
+	// this one's inputs (round's own dispatched request + its cheapest
+	// offer) are already fully known here.
+	if link := bookingLink(rounds); link != "" {
+		emailBody += "\n\nSee live pricing and book: " + link
+	}
 	roundsJSON, err := json.Marshal(rounds)
 	if err != nil {
 		return "", false, fmt.Errorf("agents: encoding rounds for %s: %w", requestID, err)

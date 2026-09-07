@@ -59,21 +59,21 @@ func RunTask(ctx context.Context, db *catalog.SQLite, deps routesearch.Deps, tas
 	return agents.RecordTaskResult(ctx, db, taskID)
 }
 
-// runSearch wraps the existing internal/routesearch.Search (one-way,
-// already-built) as the unit RunTask dispatches to. req.Origin/
-// req.Destination may each be a real IATA code or a plain city name
-// (FormSpec fills in a city name rather than guessing when a multi-
-// airport city like Beijing or London is named but no specific airport
-// is) — resolveAirports expands either into the airport(s) to actually
-// search, and a city with N candidates fans out into one
-// routesearch.Search call per candidate, pareto-merged into one combined
-// result set spanning every airport tried. Trims routesearch.Plan down
-// to agents.CollectRouteResult — the full Plan (candidate-by-candidate
-// audit trail) stays in the store via routesearch.Search's own catalog
-// write, not duplicated into the task's result_json; with more than one
-// candidate pair, only the last pair's plan.RequestID survives into
-// CollectRouteResult.RequestID (the catalog holds every pair's own plan
-// under its own request id regardless).
+// runSearch wraps internal/routesearch.Search (one-way) or
+// routesearch.SearchRoundTrip (round-trip, picked by req.TripType) as the
+// unit RunTask dispatches to. req.Origin/req.Destination may each be a
+// real IATA code or a plain city name (FormSpec fills in a city name
+// rather than guessing when a multi-airport city like Beijing or London
+// is named but no specific airport is) — resolveAirports expands either
+// into the airport(s) to actually search, and a city with N candidates
+// fans out into one search call per candidate pair, merged into one
+// combined result spanning every airport tried. Trims the routesearch
+// plan down to agents.CollectRouteResult — the full plan
+// (candidate-by-candidate audit trail) stays in the store via
+// routesearch's own catalog write, not duplicated into the task's
+// result_json; with more than one candidate pair, only the last pair's
+// plan.RequestID survives into CollectRouteResult.RequestID (the catalog
+// holds every pair's own plan under its own request id regardless).
 func runSearch(ctx context.Context, deps routesearch.Deps, req agents.CollectRouteRequest) (agents.CollectRouteResult, error) {
 	radiusKm := req.SearchRadiusKm
 	if radiusKm <= 0 {
@@ -86,6 +86,10 @@ func runSearch(ctx context.Context, deps routesearch.Deps, req agents.CollectRou
 	destinations, err := resolveAirports(deps.Graph, req.Destination, radiusKm)
 	if err != nil {
 		return agents.CollectRouteResult{}, fmt.Errorf("dispatch: resolving destination %q: %w", req.Destination, err)
+	}
+
+	if req.TripType == "round_trip" && req.ReturnDate != "" {
+		return runRoundTripSearch(ctx, deps, req, origins, destinations)
 	}
 
 	out := agents.CollectRouteResult{}
@@ -124,6 +128,62 @@ func runSearch(ctx context.Context, deps routesearch.Deps, req agents.CollectRou
 			Path:            r.Path,
 			SelfTransfer:    r.SelfTransfer,
 		})
+	}
+	return out, nil
+}
+
+// runRoundTripSearch is runSearch's TripType == "round_trip" branch:
+// routesearch.SearchRoundTrip per origin/destination candidate pair
+// (bundled Google fare vs. two separately-priced one-ways, whichever's
+// cheaper — see DESIGN.md "Round trips and flexible dates"), keeping
+// only the single cheapest pair's result. Unlike the one-way path, this
+// isn't pareto-merged across candidates: SearchRoundTrip already reduces
+// each pair down to one best RoundTripResult, so "cheapest across pairs"
+// is the natural way to pick among them too.
+func runRoundTripSearch(ctx context.Context, deps routesearch.Deps, req agents.CollectRouteRequest, origins, destinations []string) (agents.CollectRouteResult, error) {
+	out := agents.CollectRouteResult{}
+	var best *routesearch.RoundTripResult
+	var lastErr error
+	for _, o := range origins {
+		for _, d := range destinations {
+			plan, err := routesearch.SearchRoundTrip(ctx, deps, routesearch.Params{
+				Origin:            o,
+				Destination:       d,
+				DepartDate:        req.DepartDate,
+				MaxHours:          req.MaxHours,
+				QueryBudget:       req.QueryBudget,
+				MaxPrice:          req.MaxPrice,
+				MinLayoverMinutes: req.MinLayoverMinutes,
+				MaxLayoverMinutes: req.MaxLayoverMinutes,
+				PricePerMile:      0.08,
+			}, req.ReturnDate)
+			if err != nil {
+				lastErr = err // one candidate airport pair failing shouldn't sink every other candidate
+				continue
+			}
+			out.RequestID = plan.RequestID
+			out.QueriesUsed += plan.QueriesUsed
+			if plan.Result != nil && (best == nil || plan.Result.TotalPriceUSD < best.TotalPriceUSD) {
+				best = plan.Result
+			}
+		}
+	}
+	if best == nil && lastErr != nil {
+		return agents.CollectRouteResult{}, fmt.Errorf("dispatch: every origin/destination candidate failed, e.g.: %w", lastErr)
+	}
+	if best != nil {
+		out.Results = []agents.CollectRouteOffer{{
+			PriceUSD:              best.OutboundPriceUSD,
+			DurationMinutes:       best.OutboundDurationMinutes,
+			Path:                  best.OutboundPath,
+			SelfTransfer:          best.OutboundSelfTransfer,
+			Bundled:               best.Bundled,
+			TotalPriceUSD:         best.TotalPriceUSD,
+			ReturnPath:            best.ReturnPath,
+			ReturnPriceUSD:        best.ReturnPriceUSD,
+			ReturnDurationMinutes: best.ReturnDurationMinutes,
+			ReturnSelfTransfer:    best.ReturnSelfTransfer,
+		}}
 	}
 	return out, nil
 }
