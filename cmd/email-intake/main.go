@@ -171,9 +171,16 @@ func converse(ctx context.Context, db *catalog.SQLite, llmClient agents.LLMClien
 			fmt.Printf("\nAgent: %s\n", row.EmailBody.String)
 			return false, nil
 		case agents.StatusAwaitingUser:
-			answer, ok := prompt(reader, fmt.Sprintf("\nAgent: %s\n> ", row.EmailBody.String))
-			if !ok {
-				return true, nil
+			var answer string
+			for {
+				var ok bool
+				answer, ok = prompt(reader, fmt.Sprintf("\nAgent: %s\n> ", row.EmailBody.String))
+				if !ok {
+					return true, nil
+				}
+				if answer != "" {
+					break
+				}
 			}
 			if err := applyFollowUp(ctx, db, llmClient, nil, requestID, answer, false); err != nil {
 				return false, err
