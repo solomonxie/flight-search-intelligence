@@ -169,7 +169,15 @@ func (c *Client) Search(ctx context.Context, q Query) ([]Offer, []byte, error) {
 	return c.search(ctx, q)
 }
 
-func (c *Client) search(ctx context.Context, q Query) ([]Offer, []byte, error) {
+// SearchURL returns the Google Flights web page URL for p — a link a
+// person can open directly in a browser to see live results, check
+// current pricing, and book, using the same query encoding search() uses
+// to scrape. No request is made.
+func SearchURL(p SearchParams) string {
+	return queryURL(p.toQuery())
+}
+
+func queryURL(q Query) string {
 	v := url.Values{"tfs": {q.tfs()}}
 	if q.Language != "" {
 		v.Set("hl", q.Language)
@@ -177,8 +185,11 @@ func (c *Client) search(ctx context.Context, q Query) ([]Offer, []byte, error) {
 	if q.Currency != "" {
 		v.Set("curr", q.Currency)
 	}
+	return searchURL + "?" + v.Encode()
+}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, searchURL+"?"+v.Encode(), nil)
+func (c *Client) search(ctx context.Context, q Query) ([]Offer, []byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, queryURL(q), nil)
 	if err != nil {
 		return nil, nil, err
 	}
