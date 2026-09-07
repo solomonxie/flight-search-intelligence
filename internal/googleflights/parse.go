@@ -63,11 +63,22 @@ func parseOffers(html []byte) (offers []Offer, err error) {
 		return nil, fmt.Errorf("googleflights: decoding payload: %w", err)
 	}
 
-	flightsRaw := asSlice(idx(asSlice(idx(payload, 3)), 0))
-	if flightsRaw == nil {
-		return nil, nil
+	// Google's response splits results across two sections — payload[2]
+	// ("best flights", its own top-ranked picks, which is where the
+	// actual cheapest fares usually live) and payload[3] ("other
+	// flights", everything else). Reading only payload[3] silently drops
+	// the cheapest offers on the page — a live comparison found the
+	// site's #1 and #2 cheapest fares missing entirely, with its #3
+	// wrongly reported as "the best."
+	for _, sectionIdx := range []int{2, 3} {
+		offers = append(offers, parseFlightSection(asSlice(idx(asSlice(idx(payload, sectionIdx)), 0)))...)
 	}
 
+	return offers, nil
+}
+
+func parseFlightSection(flightsRaw []interface{}) []Offer {
+	var offers []Offer
 	for _, kRaw := range flightsRaw {
 		k := asSlice(kRaw)
 		flight := asSlice(idx(k, 0))
@@ -111,8 +122,7 @@ func parseOffers(html []byte) (offers []Offer, err error) {
 			TypicalCarbonEmissionGrams: asInt(idx(extras, 8)),
 		})
 	}
-
-	return offers, nil
+	return offers
 }
 
 // extractDS1Script returns the text content of <script class="ds:1" ...>.
