@@ -116,3 +116,34 @@ func TestRunSearch_Flexible_RoundTrip(t *testing.T) {
 		t.Errorf("TotalPriceUSD = %v, want > 0", result.Results[0].TotalPriceUSD)
 	}
 }
+
+// TestResolveAirports_CityFanoutIsBounded is a regression test: a city
+// name's radius fan-out used to return every airport OpenFlights knows
+// of within range, unfiltered — a live run had "Vancouver" resolve to
+// 17 candidates (mostly tiny regional strips with no real long-haul
+// service) which, combined with a similarly multi-airport destination,
+// meant 51 full searches for one request: slow, and plausibly enough
+// simultaneous scraping to degrade the one result that mattered (a live
+// run's real bundled fare came back worse than a hand-checked price).
+func TestResolveAirports_CityFanoutIsBounded(t *testing.T) {
+	graph, err := openflights.Load("../../data/openflights")
+	if err != nil {
+		t.Fatal(err)
+	}
+	codes, err := resolveAirports(graph, "Vancouver", 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(codes) > maxCityCandidates {
+		t.Errorf("got %d candidates for Vancouver, want <= maxCityCandidates (%d): %v", len(codes), maxCityCandidates, codes)
+	}
+	found := false
+	for _, c := range codes {
+		if c == "YVR" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("candidates %v don't include YVR — the actual major gateway got filtered out", codes)
+	}
+}

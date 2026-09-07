@@ -13,6 +13,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
 
 	"flight-search-intelligence/internal/agents"
@@ -325,5 +326,51 @@ func resolveAirports(graph *openflights.Graph, field string, radiusKm float64) (
 	if len(codes) == 0 {
 		return nil, fmt.Errorf("no airports found within %gkm of %q", radiusKm, field)
 	}
+	codes = wellConnected(graph, codes)
+	if len(codes) == 0 {
+		return nil, fmt.Errorf("no well-connected airport found within %gkm of %q", radiusKm, field)
+	}
 	return codes, nil
+}
+
+// minCityAirportOutDegree/maxCityCandidates bound a city name's radius
+// fan-out. AirportsWithinRadiusKm returns every airport OpenFlights
+// knows about within range, unfiltered by real-world relevance — for a
+// city like Vancouver that's a dozen-plus tiny regional strips alongside
+// the one real international gateway. Searching every one of them
+// multiplies query volume by however many candidates a multi-airport
+// city resolves to on *each* end (a live run: 17 Vancouver-radius
+// candidates x 3 Beijing candidates = 51 full searches for one request)
+// — slow, and a real risk of tripping Google's own rate limiting on the
+// query that actually matters (a live run's real bundled round-trip
+// fare came back worse than a hand-checked one, plausibly because of
+// exactly this: dozens of near-simultaneous scrapes against the same
+// route/date). A real airport's own route count (out-degree) is a cheap,
+// real signal for "actually useful as a candidate" that pure distance
+// isn't — same reasoning as nhop.go's minHubOutDegree.
+const (
+	minCityAirportOutDegree = 5
+	maxCityCandidates       = 5
+)
+
+func wellConnected(graph *openflights.Graph, codes []string) []string {
+	type scored struct {
+		code   string
+		degree int
+	}
+	var kept []scored
+	for _, c := range codes {
+		if degree := len(graph.Routes[c]); degree >= minCityAirportOutDegree {
+			kept = append(kept, scored{c, degree})
+		}
+	}
+	sort.Slice(kept, func(i, j int) bool { return kept[i].degree > kept[j].degree })
+	if len(kept) > maxCityCandidates {
+		kept = kept[:maxCityCandidates]
+	}
+	out := make([]string, len(kept))
+	for i, k := range kept {
+		out[i] = k.code
+	}
+	return out
 }
