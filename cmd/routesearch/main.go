@@ -62,6 +62,10 @@ func run() error {
 	availableUntil := flag.String("available-until", "", "flexible-date scan: reject a chosen date whose depart/return falls after this YYYY-MM-DD")
 	excludeWeekdays := flag.String("exclude-weekdays", "", "flexible-date scan: comma-separated weekday names (e.g. Monday,Tuesday) to exclude as a chosen depart date")
 	blackoutDates := flag.String("blackout-dates", "", "flexible-date scan: comma-separated YYYY-MM-DD dates to exclude as a chosen depart/return date (e.g. holidays)")
+
+	maxLegs := flag.Int("max-legs", 1, "max hops in a split-ticket itinerary; 1 (default) is today's A->hub->B search unchanged, >1 switches to the N-hop label-setting search")
+	maxCountries := flag.Int("max-countries", 0, "cap on distinct countries a candidate path may transit (0 = no cap)")
+	excludedCountries := flag.String("excluded-countries", "", "comma-separated country names (as OpenFlights spells them) a candidate path may never transit")
 	flag.Parse()
 
 	if *origin == "" || *destination == "" || *date == "" {
@@ -95,6 +99,7 @@ func run() error {
 		MaxHours: *maxHours, QueryBudget: *budget,
 		MinLayoverMinutes: *minLayover, MaxLayoverMinutes: *maxLayover,
 		PricePerMile: *pricePerMile, Delay: *delay, ForceRefresh: *forceRefresh,
+		MaxLegs: *maxLegs, MaxCountries: *maxCountries, ExcludedCountries: splitNonEmpty(*excludedCountries),
 	}
 
 	// No overall context deadline anywhere below: this is a deliberately

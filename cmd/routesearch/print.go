@@ -12,7 +12,11 @@ func printSummary(plan *routesearch.Plan) {
 	fmt.Printf("\nRequest %s: %d queries used, %d/%d candidate hubs survived the geometry prune.\n",
 		plan.RequestID, plan.QueriesUsed, plan.CandidatesAfterGeometryPrune, plan.CandidatesConsidered)
 
-	printCandidates(plan)
+	if plan.Input.MaxLegs > 1 {
+		printNHopCandidates(plan)
+	} else {
+		printCandidates(plan)
+	}
 
 	if len(plan.FinalResult) == 0 {
 		fmt.Println("\nNo feasible itineraries found.")
@@ -134,6 +138,9 @@ func describeResult(r routesearch.Result) string {
 	kind := "single-ticket"
 	if r.SelfTransfer {
 		kind = "SEPARATE TICKETS — self-transfer risk"
+		if r.TransferCount > 1 {
+			kind = fmt.Sprintf("SEPARATE TICKETS — %d transfers, self-transfer risk at each", r.TransferCount)
+		}
 	}
 	stopover := ""
 	if r.Stopover {
@@ -186,6 +193,21 @@ func printCandidates(plan *routesearch.Plan) {
 		}
 		fmt.Printf("%-5d %-6s %-9.1f %-18s %-8s %-8s %-11s %s\n",
 			c.Rank, c.Hub, c.LBUSD, c.Outcome, leg1, leg2, combined, c.Reason)
+	}
+}
+
+// printNHopCandidates is printCandidates' MaxLegs > 1 counterpart —
+// NHopOutcome's shape (one row per edge tried, "from this partial
+// itinerary to this airport") rather than CandidateOutcome's fixed
+// leg1/leg2 columns, since a path can be any length here.
+func printNHopCandidates(plan *routesearch.Plan) {
+	fmt.Printf("\n%-7s %-6s %-9s %-9s %-11s %s\n", "From", "To", "LB $", "Price $", "Outcome", "Reason")
+	for _, e := range plan.NHopRanked {
+		price := ""
+		if e.PriceUSD > 0 {
+			price = fmt.Sprintf("%.0f", e.PriceUSD)
+		}
+		fmt.Printf("%-7s %-6s %-9.1f %-9s %-11s %s\n", joinPath(e.FromPath), e.To, e.LBUSD, price, e.Outcome, e.Reason)
 	}
 }
 

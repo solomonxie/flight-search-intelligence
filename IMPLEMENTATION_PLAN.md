@@ -113,31 +113,58 @@ Phase 1 (the loop to plug into).
       finalized). Real transcripts (prompt + raw reply) captured for all
       three — see conversation, not reproduced here
 
-## Phase 3: Deeper itineraries — N-hop search + hop-country constraints
+## Phase 3: Deeper itineraries — N-hop search + hop-country constraints — done
 
 DESIGN.md "Deeper itineraries: N-hop search and hop-country
-constraints" (designed: `ac24419`, not yet built). Extends Phase 0's
-search directly — do the state-model change once, carefully; everything
-else in this phase builds on it. Depends on Phase 0.
+constraints" (designed: `ac24419`). Extends Phase 0's search directly.
+Depends on Phase 0.
 
-- [ ] `routesearch.Params`: add `MaxLegs int`, default 1 (today's 1-stop
-      behavior unchanged when unset)
-- [ ] Generalize `search.go`'s fixed `A→hub→B` loop into label-setting
-      search: state `(node, arrival_time, price_so_far, duration_so_far,
-      legs_so_far)`, Pareto-dominance pruning per node, `legs_so_far`
-      as a hard cutoff at `MaxLegs`
-- [ ] Decide + implement `QUERY_BUDGET` scaling for `MaxLegs > 1` (flat
-      default today plausibly too tight past 2 legs — DESIGN.md flags
-      this as still open)
-- [ ] `routesearch.Params`: add `MaxCountries int` and
+- [x] `routesearch.Params`: add `MaxLegs int`, default 1 (today's 1-stop
+      behavior unchanged when unset) — `Search` dispatches to `searchNHop`
+      (`nhop.go`) only when `MaxLegs > 1`; the original loop is untouched
+      otherwise (verified: `TestSearch_MaxLegsOneUnchanged`)
+- [x] Generalize `search.go`'s fixed `A→hub→B` loop into label-setting
+      search: state `(node, price_so_far, duration_so_far, last offer)`,
+      Pareto-dominance pruning per node (`dominated`/`keepNonDominated`),
+      `legs_so_far` (`nhopLabel.legs()`) as a hard cutoff at `MaxLegs` —
+      `nhop.go`. `openflights.Graph.Neighbors` added alongside
+      `CandidateHubs`: an intermediate hop doesn't need a direct route to
+      the final destination the way a 1-stop hub does, so N-hop candidate
+      generation needed the plain adjacency, not the destination-filtered
+      one. Turned out to need one more prune `CandidateHubs` gets for
+      free: a hub-connectivity filter (`minHubOutDegree`) — without one,
+      a well-connected origin's raw `Neighbors` fans out into dead-end
+      regional airports that look deceptively cheap by raw distance
+      alone and starve the flat query budget before a real path ever
+      gets a second hop
+- [x] `QUERY_BUDGET` stays flat, not scaled by `MaxLegs` — asked; a
+      high-degree origin genuinely can starve a deep search under a flat
+      budget (observed live: YVR's ~100+ major-hub neighbors alone ate a
+      200-query budget without ever reaching hop 2), an accepted
+      consequence of this choice, not a bug — a caller wanting deeper
+      search from a well-connected origin raises `QueryBudget` itself
+- [x] `routesearch.Params`: add `MaxCountries int` and
       `ExcludedCountries []string`
-- [ ] Wire both into `candidates.go`'s geometry-prune stage — country
-      already available per airport via `openflights.Airport.Country`,
-      no new data source needed
-- [ ] Extend the audit trail (`CandidateOutcome`/`Plan`) to record legs
-      and countries transited per kept candidate, not just hub + price
-- [ ] Update self-transfer risk reporting from a single bool to a real
-      transfer count once `MaxLegs > 2` is reachable
+- [x] Wire both into `candidates.go`'s geometry-prune stage —
+      `excludesCountry`/`countDistinctCountries`, applied in both
+      `ResolveCandidates` (1-stop) and `nhop.go`'s `candidateEdges`
+- [x] Extend the audit trail: `Plan.NHopRanked []NHopOutcome` — a sibling
+      to `CandidatesRanked`, not a forced fit into its leg1/leg2 shape,
+      since an N-hop edge is "from this partial path to this airport,"
+      not a fixed two-leg row
+- [x] Self-transfer risk reporting: `Result.TransferCount` added
+      alongside the existing `SelfTransfer` bool (`len(Path)-2` —
+      distinguishes one hub from a four-hop combo, same risk category,
+      different magnitude) — `cmd/routesearch/print.go` surfaces it
+- [x] `cmd/routesearch`: `-max-legs`, `-max-countries`,
+      `-excluded-countries` flags; `printNHopCandidates` (print.go) as
+      `printCandidates`'s `NHopRanked` counterpart
+- [x] Verified: `internal/routesearch/nhop_test.go` — `MaxLegs` 0/1 take
+      the untouched original path (`NHopRanked` stays empty); a
+      synthetic-offer scenario (expensive baseline, cheap subsequent
+      legs) proves the search actually chains hops into a genuine
+      multi-leg result cheaper than the baseline, respects `MaxLegs` and
+      `QueryBudget`, and never revisits an airport within one itinerary
 
 ## Phase 4: Baggage and other per-request search filters
 

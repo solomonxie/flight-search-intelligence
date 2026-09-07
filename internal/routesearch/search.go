@@ -13,7 +13,16 @@ import (
 // budget-bounded loop over the survivors. Always returns a Plan (with
 // Status set) even on a request-level error, since a partial audit
 // trail is still worth keeping.
+//
+// MaxLegs > 1 hands off to searchNHop (nhop.go) instead — the label-
+// setting generalization to arbitrary depth (DESIGN.md "Deeper
+// itineraries"). Everything below this check is the original 1-stop
+// loop, untouched, so MaxLegs 0/1 (today's default) behaves exactly as
+// it always has.
 func Search(ctx context.Context, deps Deps, p Params) (*Plan, error) {
+	if p.MaxLegs > 1 {
+		return searchNHop(ctx, deps, p)
+	}
 	requestID := fmt.Sprintf("%s-%s-%s-%d", p.Origin, p.Destination, p.DepartDate, time.Now().UnixNano())
 	log := deps.Logger.With("request_id", requestID)
 	plan := &Plan{RequestID: requestID, Input: p, Status: "running"}
