@@ -2,6 +2,7 @@ package agents
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 )
@@ -41,6 +42,36 @@ func NewLLMClientFromEnv() (LLMClient, error) {
 		return NewOpenAIClient(key, envOrDefault("OPENAI_MODEL", "gpt-4o-mini"), envOrDefault("OPENAI_REASONING_EFFORT", "high")), nil
 	default:
 		return nil, fmt.Errorf("agents: unknown LLM_BACKEND %q (want \"ollama\" or \"openai\")", backend)
+	}
+}
+
+// maxJSONRetries bounds chatJSON's retries on a reply that fails to
+// parse. A live run against Ollama's qwen3:8b (this project's default
+// backend) found format:"json" occasionally has the model degenerate
+// mid-object — the exact same prompt, replayed standalone, produced
+// valid JSON on 4/4 tries — so a parse failure is far more likely one
+// bad sample than a systematic prompt problem; retrying the whole call
+// costs one more request and almost always recovers.
+const maxJSONRetries = 2
+
+// chatJSON calls llm.Chat and requires the reply to parse cleanly into
+// out, retrying the call (not just re-parsing the same bad reply) up to
+// maxJSONRetries times on failure. Every caller in this package (FormSpec,
+// DecideNextAction, DraftFinalEmail) follows the same "one Chat call,
+// parse the JSON reply" shape, so this is the one place that shape's
+// error handling lives, rather than duplicated three times.
+func chatJSON(ctx context.Context, llm LLMClient, systemPrompt, userPrompt string, out any) (raw string, err error) {
+	for attempt := 0; ; attempt++ {
+		raw, err = llm.Chat(ctx, systemPrompt, userPrompt)
+		if err != nil {
+			return "", err
+		}
+		if err = json.Unmarshal([]byte(raw), out); err == nil {
+			return raw, nil
+		}
+		if attempt >= maxJSONRetries {
+			return raw, fmt.Errorf("parsing LLM reply %q: %w", raw, err)
+		}
 	}
 }
 
