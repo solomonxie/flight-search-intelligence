@@ -21,19 +21,20 @@ Spec's fields, and when to set each:
   Origin, Destination: a real, single-airport IATA code (3 uppercase letters) — the code an actual airport uses, never a metro/city code that covers several airports (e.g. Tokyo is NRT or HND, never "TYO"; London is LHR/LGW/STN/etc, never "LON"; New York is JFK/LGA/EWR, never "NYC") — ONLY when the text names or clearly implies one specific airport. Otherwise, when only a city is named — including a multi-airport city like Beijing or London — set the field to that city's plain name instead (e.g. "Beijing", "London"): a later step searches every airport in that city and keeps whichever comes back cheapest, so don't guess a specific airport the text didn't ask for, and don't leave the field blank just because the city has more than one.
   TripType: "one_way", "round_trip", or "" if the text gives no signal either way. Set this ONLY from an explicit signal — "round trip", "return", "back by/on/around X", a second distinct travel date, or (for one_way) "one-way"/"single trip"/"not coming back". A departure date alone, however specific or vague, is NOT a signal either way: never infer one_way just because no return was mentioned, and never infer round_trip just because a date phrase happens to span a range — leave TripType "" and let a later step ask, rather than guessing silently (a live run once turned an answer to "what's your departure date?" of "end of year" into an invented Dec 31 return date it was never asked for).
   DepartDate, ReturnDate: YYYY-MM-DD. Resolve relative dates ("next month", "over Christmas") against today's date above. Only ever set ReturnDate when TripType is (or becomes, from this text) "round_trip" — if TripType is "" or "one_way", ReturnDate stays "" regardless of what DepartDate's own phrase looks like.
+  "next <month name>" means the NEXT calendar occurrence of that month strictly after today — if that month number is <= today's month number, it's already happened this year, so it means that month IN THE FOLLOWING YEAR, not this year's (already-past) one. E.g. today 2026-09-07, "next Jan" -> 2027-01 (January 2026 already happened 8 months ago); today 2026-09-07, "next Nov" -> 2026-11 (November hasn't happened yet this year). A live run got this wrong exactly this way once — "vancouver, next jan" with today in September resolved to 2026-01-01, a date already 8 months in the past and, worse, nearly a year *before* the trip's own DepartDate — never resolve a date that lands before DepartDate for a round trip; if the arithmetic would do that, the month means next year instead.
   A vague phrase ("end of year", "beginning of next month", "sometime in spring") names a date *range*, not one day — don't collapse it to your first guess. Work out the range, then take its earliest date for DepartDate (a later true preference still searches fine; picking a late date would wrongly exclude earlier valid ones). E.g. "end of year" ≈ Dec 15–31 → DepartDate uses Dec 15. Never resolve ReturnDate from this same phrase or range, even when this is a round trip — see next.
   When TripType is "round_trip", ReturnDate must come from its own, distinct time expression found elsewhere in the text — never DepartDate's own phrase or range reused. A second period shows up two ways: joined directly ("December to next Jan", "leaving in June, back in July"), or introduced anywhere else in the text by an explicit return marker ("return in/on/around X", "back by X") — e.g. "round trip, end of year, return in next jan" has TWO periods (end of year; next Jan): DepartDate resolves "end of year" alone, ReturnDate resolves "next Jan" alone (each per the range rule above). If the text gives only ONE time expression total — e.g. "vancouver, end of year, round trip" has just the one range, nothing marking a return — ReturnDate stays "" and Notes gets an entry saying so (e.g. "round trip, but no return date given — only a departure window was mentioned"), so the next step asks for it explicitly instead of inventing one out of the departure range (a live run once did exactly that: "end of year" round trip silently became Dec 15 out / Dec 31 back, a return date never actually given).
   WindowDays, StepDays: 0 (the default) means an exact date search. Only set WindowDays > 0 from an EXPLICIT flexibility signal — the traveler saying they don't care which exact day, want the cheapest day, or naming a +/- range around a date ("I'm flexible", "any day that week works", "whichever's cheapest", "the 15th, give or take 3 days"). This is a different thing from a vague date phrase like "end of year": that's still DepartDate's own earliest-date rule above (a single guess to search), not a signal to scan a window — don't set WindowDays just because DepartDate came from a vague phrase. When you do set WindowDays, set it to how many days on each side of DepartDate to scan (e.g. "give or take 3 days" -> 3; "sometime within that week" -> 3 as a reasonable week-ish default); StepDays only matters if the traveler asked for coarser sampling than daily (e.g. "check every few days") — leave it 0 (daily) otherwise.
   MaxHours: max tolerable total elapsed trip time, in hours. Default 30 if the text doesn't say.
   QueryBudget: how many hub candidates the search may try. Default 20 if the text doesn't say.
   MaxPrice: hard USD price ceiling, 0 = none. Only set this from an explicit price/budget the text actually states.
-  MinLayoverMinutes, MaxLayoverMinutes: default 45 and 720 if the text doesn't say otherwise.
+  MinLayoverMinutes, MaxLayoverMinutes: default 120 and 720 (2 hours and 12 hours — comfortable, not rushed) if the text doesn't say otherwise.
   SearchRadiusKm: how far (km) around a named city's center to also consider alternate airports — only matters when Origin/Destination is a city name rather than one specific airport. Default 100 if the text doesn't say; only override this from an explicit distance the traveler states (e.g. "within 50km of Beijing", "airports up to 200km out are fine").
   SoftConstraints: a plain-language list for anything else that matters but isn't one of the fields above — a judgment call needing context, not a threshold (e.g. "must be there for Christmas", "no self-transfer / separate tickets", "traveling with an infant"). Append new ones to whatever's already there; never drop an existing entry.
   Notes: a plain-language list, one entry per field you left genuinely blank *for a specific reason* the next step needs in order to ask a sharp follow-up instead of a generic one (e.g. an unresolved date range, or a place name that isn't a recognizable city or airport at all). A named multi-airport city is NOT one of these — that goes in Origin/Destination as the city name, per above, not a blank field with a note. Unlike SoftConstraints, Notes is not permanent: once the new text resolves what a note was about, drop that note — keep only notes still unresolved.
 
 Reply with EXACTLY one JSON object, no prose outside it, no markdown fences:
-{"Spec": {"Origin": "...", "Destination": "...", "TripType": "one_way"|"round_trip"|"", "DepartDate": "...", "ReturnDate": "...", "MaxHours": 30, "QueryBudget": 20, "MaxPrice": 0, "MinLayoverMinutes": 45, "MaxLayoverMinutes": 720, "SearchRadiusKm": 100, "WindowDays": 0, "StepDays": 0, "SoftConstraints": ["..."], "Notes": ["..."]}, "Reasoning": "one sentence on what you filled in or left blank and why"}`
+{"Spec": {"Origin": "...", "Destination": "...", "TripType": "one_way"|"round_trip"|"", "DepartDate": "...", "ReturnDate": "...", "MaxHours": 30, "QueryBudget": 20, "MaxPrice": 0, "MinLayoverMinutes": 120, "MaxLayoverMinutes": 720, "SearchRadiusKm": 100, "WindowDays": 0, "StepDays": 0, "SoftConstraints": ["..."], "Notes": ["..."]}, "Reasoning": "one sentence on what you filled in or left blank and why"}`
 
 // FormSpec turns existing (the spec so far — zero value for a new
 // request) plus text (the new email/CLI text to fold in) into an
@@ -58,7 +59,25 @@ func FormSpec(ctx context.Context, llm LLMClient, existing Spec, text string) (S
 	if err != nil {
 		return Spec{}, "", fmt.Errorf("agents: LLM spec-formation call: %w", err)
 	}
-	return normalizeDefaults(reply.Spec, existing), reply.Reasoning, nil
+	return validateDates(normalizeDefaults(reply.Spec, existing)), reply.Reasoning, nil
+}
+
+// validateDates catches a ReturnDate the model computed wrong rather
+// than trusting date arithmetic to always be right — a live run had
+// "next jan" (today in September) resolve to *this* January instead of
+// next year's, landing ReturnDate almost a year *before* DepartDate; the
+// bad Spec still dispatched, burning dozens of queries (every
+// multi-airport candidate pair, both directions) before finalizing a
+// literally backwards "round trip." A return before departure is never
+// legitimate, so it's cleared back to "" (with a Note explaining why,
+// same convention as any other field DecideNextAction needs to ask
+// about again) rather than letting a bad date silently reach dispatch.
+func validateDates(s Spec) Spec {
+	if s.TripType == "round_trip" && s.DepartDate != "" && s.ReturnDate != "" && s.ReturnDate <= s.DepartDate {
+		s.ReturnDate = ""
+		s.Notes = append(s.Notes, fmt.Sprintf("return date resolved before/on the departure date (%s) — likely a year miscount on a relative date; needs to be asked again", s.DepartDate))
+	}
+	return s
 }
 
 // Defaults formSpecSystemPromptTemplate documents and asks the model to
@@ -73,7 +92,7 @@ func FormSpec(ctx context.Context, llm LLMClient, existing Spec, text string) (S
 const (
 	defaultMaxHours          = 30
 	defaultQueryBudget       = 20
-	defaultMinLayoverMinutes = 45
+	defaultMinLayoverMinutes = 120
 	defaultMaxLayoverMinutes = 720
 	defaultSearchRadiusKm    = 100
 )
