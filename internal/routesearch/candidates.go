@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	"flight-search-intelligence/internal/openflights"
 )
@@ -15,6 +16,36 @@ const (
 
 func estimateMinutes(distanceMiles float64) float64 {
 	return distanceMiles/avgCruiseMPH*60 + perLegOverheadMinute
+}
+
+// excludesCountry reports whether country appears in excluded
+// (case-insensitive) — Params.ExcludedCountries' hard-prune check,
+// shared by the 1-stop and N-hop geometry-prune stages.
+func excludesCountry(excluded []string, country string) bool {
+	for _, c := range excluded {
+		if strings.EqualFold(c, country) {
+			return true
+		}
+	}
+	return false
+}
+
+// countDistinctCountries returns how many distinct countries the given
+// IATA codes plus one extra candidate country span — Params.MaxCountries'
+// check. Unresolvable airports are skipped rather than erroring: an
+// unknown country is better treated as "doesn't add a new one" than as a
+// search-ending failure this deep in a prune.
+func countDistinctCountries(graph *openflights.Graph, path []string, candidateCountry string) int {
+	seen := map[string]bool{}
+	for _, iata := range path {
+		if a, ok := graph.Airport(iata); ok && a.Country != "" {
+			seen[a.Country] = true
+		}
+	}
+	if candidateCountry != "" {
+		seen[candidateCountry] = true
+	}
+	return len(seen)
 }
 
 // ResolveCandidates runs Search's candidate-generation step standalone:
@@ -45,6 +76,12 @@ func ResolveCandidates(ctx context.Context, deps Deps, p Params) (*CandidatePrev
 		hub, ok := deps.Graph.Airport(h)
 		if !ok {
 			continue
+		}
+		if excludesCountry(p.ExcludedCountries, hub.Country) {
+			continue // a real constraint (visa/sanctions/safety) — see Params.ExcludedCountries
+		}
+		if p.MaxCountries > 0 && countDistinctCountries(deps.Graph, []string{p.Origin, p.Destination}, hub.Country) > p.MaxCountries {
+			continue // the full path is Origin->hub->Destination — all three count
 		}
 		d1 := openflights.DistanceMiles(origin, hub)
 		d2 := openflights.DistanceMiles(hub, destination)

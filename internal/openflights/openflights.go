@@ -126,7 +126,9 @@ func (g *Graph) AirportsWithinRadiusKm(lat, lon, radiusKm float64) []string {
 
 // CandidateHubs returns every airport h (other than origin/destination)
 // with a nonstop route both origin->h and h->destination — the raw
-// candidate set before any geometry/price pruning.
+// candidate set before any geometry/price pruning. Specific to the
+// 1-stop case (both ends of the route matter); see Neighbors for the
+// N-hop generalization, where only the "from" side is fixed.
 func (g *Graph) CandidateHubs(origin, destination string) []string {
 	var hubs []string
 	for h := range g.Routes[origin] {
@@ -138,6 +140,23 @@ func (g *Graph) CandidateHubs(origin, destination string) []string {
 		}
 	}
 	return hubs
+}
+
+// Neighbors returns every airport with at least one direct scheduled
+// route from origin — the full 1-hop reachable set, unfiltered by
+// whether it also reaches any particular destination. CandidateHubs'
+// "must also connect to destination" filter only makes sense when
+// there's exactly one more hop left; deeper in a multi-hop itinerary,
+// requiring a direct route to the final destination from an
+// intermediate node would wrongly rule out real multi-hop paths, so
+// this is the raw adjacency the N-hop search prunes itself (geometry,
+// then admissible price bound) rather than pre-filtering by destination.
+func (g *Graph) Neighbors(origin string) []string {
+	var out []string
+	for h := range g.Routes[origin] {
+		out = append(out, h)
+	}
+	return out
 }
 
 // DistanceMiles is the great-circle (haversine) distance between two
