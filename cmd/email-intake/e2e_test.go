@@ -248,6 +248,38 @@ func TestAgentLoop_CompleteRequestDispatches(t *testing.T) {
 	}
 }
 
+// --- Case: an explicit flexible-date request (WindowDays > 0) must
+// actually scan the window (dispatch.runFlexibleSearch), not just price
+// the one date named — and the final answer should say which date won.
+
+func TestAgentLoop_FlexibleDates(t *testing.T) {
+	h := newHarness(t)
+	row := h.turn("one-way flight from YVR to PEK, flexible dates around 2026-12-15, give or take 3 days, whichever's cheapest")
+
+	if row.Status != agents.StatusFinalized {
+		t.Fatalf("status = %q, want %q: %s", row.Status, agents.StatusFinalized, row.EmailBody.String)
+	}
+
+	spec := h.spec(row)
+	if spec.WindowDays <= 0 {
+		t.Fatalf("WindowDays = %d, want > 0 — an explicit \"give or take N days\" should trigger a flexible-date search", spec.WindowDays)
+	}
+
+	var rounds []agents.RoundRecord
+	if err := json.Unmarshal([]byte(row.RoundsJSON), &rounds); err != nil {
+		t.Fatalf("decoding rounds: %v", err)
+	}
+	var chosenDate string
+	for _, r := range rounds {
+		if r.Result != nil && r.Result.ChosenDepartDate != "" {
+			chosenDate = r.Result.ChosenDepartDate
+		}
+	}
+	if chosenDate == "" {
+		t.Error("no round reported a ChosenDepartDate — the flexible search never recorded which date in the window won")
+	}
+}
+
 // --- Case 3: user requests a change after finalizing — must actually
 // redispatch, not just repeat the old answer (see the commit fixing
 // TripType round_trip vs one_way returning the same cached price).
