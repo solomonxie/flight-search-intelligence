@@ -21,8 +21,8 @@ Spec's fields, and when to set each:
   Origin, Destination: a real, single-airport IATA code (3 uppercase letters) — the code an actual airport uses, never a metro/city code that covers several airports (e.g. Tokyo is NRT or HND, never "TYO"; London is LHR/LGW/STN/etc, never "LON"; New York is JFK/LGA/EWR, never "NYC") — ONLY when the text names or clearly implies one specific airport. Otherwise, when only a city is named — including a multi-airport city like Beijing or London — set the field to that city's plain name instead (e.g. "Beijing", "London"): a later step searches every airport in that city and keeps whichever comes back cheapest, so don't guess a specific airport the text didn't ask for, and don't leave the field blank just because the city has more than one.
   TripType: "one_way", "round_trip", or "" if the text gives no signal either way. Set this ONLY from an explicit signal — "round trip", "return", "back by/on/around X", a second distinct travel date, or (for one_way) "one-way"/"single trip"/"not coming back". A departure date alone, however specific or vague, is NOT a signal either way: never infer one_way just because no return was mentioned, and never infer round_trip just because a date phrase happens to span a range — leave TripType "" and let a later step ask, rather than guessing silently (a live run once turned an answer to "what's your departure date?" of "end of year" into an invented Dec 31 return date it was never asked for).
   DepartDate, ReturnDate: YYYY-MM-DD. Resolve relative dates ("next month", "over Christmas") against today's date above. Only ever set ReturnDate when TripType is (or becomes, from this text) "round_trip" — if TripType is "" or "one_way", ReturnDate stays "" regardless of what DepartDate's own phrase looks like.
-  A vague phrase ("end of year", "beginning of next month", "sometime in spring") names a date *range*, not one day — don't collapse it to your first guess. Work out the range, then pick whichever end keeps the traveler's options widest for that field: DepartDate takes the range's earliest date (a later true preference still searches fine; picking a late date would wrongly exclude earlier valid ones), ReturnDate (round_trip only) takes the range's latest date (same reasoning, mirrored). E.g. "end of year" ≈ Dec 15–31 → DepartDate uses Dec 15 (and, only if this is a round trip, ReturnDate would use Dec 31 from its own separate range — see next).
-  When TripType is "round_trip", read the whole message for a SECOND time expression before resolving DepartDate — don't stop at the first one you find and reuse it for ReturnDate too. A second period shows up two ways: joined directly ("December to next Jan", "leaving in June, back in July"), or introduced anywhere else in the text by an explicit return marker ("return in/on/around X", "back by X") — e.g. "round trip, end of year, return in next jan" has TWO periods (end of year; next Jan): DepartDate resolves "end of year" alone, ReturnDate resolves "next Jan" alone (each per the range rule above) — reusing "end of year" for both is wrong even though only one range appears near the start of the message.
+  A vague phrase ("end of year", "beginning of next month", "sometime in spring") names a date *range*, not one day — don't collapse it to your first guess. Work out the range, then take its earliest date for DepartDate (a later true preference still searches fine; picking a late date would wrongly exclude earlier valid ones). E.g. "end of year" ≈ Dec 15–31 → DepartDate uses Dec 15. Never resolve ReturnDate from this same phrase or range, even when this is a round trip — see next.
+  When TripType is "round_trip", ReturnDate must come from its own, distinct time expression found elsewhere in the text — never DepartDate's own phrase or range reused. A second period shows up two ways: joined directly ("December to next Jan", "leaving in June, back in July"), or introduced anywhere else in the text by an explicit return marker ("return in/on/around X", "back by X") — e.g. "round trip, end of year, return in next jan" has TWO periods (end of year; next Jan): DepartDate resolves "end of year" alone, ReturnDate resolves "next Jan" alone (each per the range rule above). If the text gives only ONE time expression total — e.g. "vancouver, end of year, round trip" has just the one range, nothing marking a return — ReturnDate stays "" and Notes gets an entry saying so (e.g. "round trip, but no return date given — only a departure window was mentioned"), so the next step asks for it explicitly instead of inventing one out of the departure range (a live run once did exactly that: "end of year" round trip silently became Dec 15 out / Dec 31 back, a return date never actually given).
   MaxHours: max tolerable total elapsed trip time, in hours. Default 30 if the text doesn't say.
   QueryBudget: how many hub candidates the search may try. Default 20 if the text doesn't say.
   MaxPrice: hard USD price ceiling, 0 = none. Only set this from an explicit price/budget the text actually states.
@@ -48,18 +48,72 @@ func FormSpec(ctx context.Context, llm LLMClient, existing Spec, text string) (S
 	}
 	user := fmt.Sprintf("Existing spec so far:\n%s\n\nNew text to fold in:\n%s", existingJSON, text)
 
-	raw, err := llm.Chat(ctx, system, user)
-	debugLog.Debug("FormSpec LLM call", "system", system, "user", user, "raw_reply", raw)
-	if err != nil {
-		return Spec{}, "", fmt.Errorf("agents: LLM spec-formation call: %w", err)
-	}
-
 	var reply struct {
 		Spec      Spec
 		Reasoning string
 	}
-	if err := json.Unmarshal([]byte(raw), &reply); err != nil {
-		return Spec{}, "", fmt.Errorf("agents: parsing LLM spec reply %q: %w", raw, err)
+	raw, err := chatJSON(ctx, llm, system, user, &reply)
+	debugLog.Debug("FormSpec LLM call", "system", system, "user", user, "raw_reply", raw)
+	if err != nil {
+		return Spec{}, "", fmt.Errorf("agents: LLM spec-formation call: %w", err)
 	}
-	return reply.Spec, reply.Reasoning, nil
+	return normalizeDefaults(reply.Spec, existing), reply.Reasoning, nil
+}
+
+// Defaults formSpecSystemPromptTemplate documents and asks the model to
+// apply itself — kept here too because it doesn't always reliably do so
+// (a live run left MaxHours/MinLayoverMinutes/etc. all zeroed despite the
+// prompt's explicit instruction). None of these fields has a real "0"
+// meaning — even MinLayoverMinutes:0 was never a deliberate answer, just
+// "the model didn't fill it in" — so leaving them at 0 isn't just
+// cosmetic: MaxHours:0 would make every future search reject every
+// result as too slow, and it'd leave nothing real for the ask_user
+// question to disclose as "here's what I'll default to."
+const (
+	defaultMaxHours          = 30
+	defaultQueryBudget       = 20
+	defaultMinLayoverMinutes = 45
+	defaultMaxLayoverMinutes = 720
+	defaultSearchRadiusKm    = 100
+)
+
+// normalizeDefaults forward-fills a zeroed numeric field from existing
+// (the spec so far) or, failing that, the hardcoded default above — the
+// same "treat zero as omitted, not deliberate" fallback
+// fillDispatchDefaults already applies one step later (at dispatch time),
+// applied here too so a Spec never sits with an unfilled default in the
+// meantime. MaxPrice is deliberately excluded: 0 there is its own
+// documented, legitimate value ("no cap"), never "not filled in."
+func normalizeDefaults(s, existing Spec) Spec {
+	if s.MaxHours == 0 {
+		s.MaxHours = existing.MaxHours
+	}
+	if s.MaxHours == 0 {
+		s.MaxHours = defaultMaxHours
+	}
+	if s.QueryBudget == 0 {
+		s.QueryBudget = existing.QueryBudget
+	}
+	if s.QueryBudget == 0 {
+		s.QueryBudget = defaultQueryBudget
+	}
+	if s.MinLayoverMinutes == 0 {
+		s.MinLayoverMinutes = existing.MinLayoverMinutes
+	}
+	if s.MinLayoverMinutes == 0 {
+		s.MinLayoverMinutes = defaultMinLayoverMinutes
+	}
+	if s.MaxLayoverMinutes == 0 {
+		s.MaxLayoverMinutes = existing.MaxLayoverMinutes
+	}
+	if s.MaxLayoverMinutes == 0 {
+		s.MaxLayoverMinutes = defaultMaxLayoverMinutes
+	}
+	if s.SearchRadiusKm == 0 {
+		s.SearchRadiusKm = existing.SearchRadiusKm
+	}
+	if s.SearchRadiusKm == 0 {
+		s.SearchRadiusKm = defaultSearchRadiusKm
+	}
+	return s
 }

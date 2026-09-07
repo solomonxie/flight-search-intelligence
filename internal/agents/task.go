@@ -12,7 +12,7 @@ package agents
 type CollectRouteRequest struct {
 	Origin            string
 	Destination       string
-	TripType          string // "one_way" | "round_trip" | "" (unresolved) — see Spec.TripType; not yet passed to routesearch.Params, which is one-way only for now
+	TripType          string // "one_way" | "round_trip" | "" (unresolved) — see Spec.TripType; dispatch.runSearch routes "round_trip" to routesearch.SearchRoundTrip instead of the plain one-way Search
 	DepartDate        string
 	ReturnDate        string
 	MaxHours          float64
@@ -32,12 +32,27 @@ type CollectRouteResult struct {
 	Results     []CollectRouteOffer
 }
 
-// CollectRouteOffer is one itinerary from the Pareto set routesearch.Search
-// returns, trimmed to what the finalize-email step and the soft-constraint
-// check (DESIGN.md step 4) need.
+// CollectRouteOffer is one itinerary — from the Pareto set
+// routesearch.Search returns for TripType "one_way", or the single best
+// comparison routesearch.SearchRoundTrip returns for "round_trip" —
+// trimmed to what the finalize-email step and the soft-constraint check
+// (DESIGN.md step 4) need.
+//
+// For "round_trip", PriceUSD/DurationMinutes/Path/SelfTransfer describe
+// the outbound leg alone (zero/empty when Bundled is true — a bundled
+// fare prices the whole trip as one ticket, with no separate outbound
+// price to report); TotalPriceUSD is the trip's real price and what to
+// quote, with the Return* fields describing the other direction.
 type CollectRouteOffer struct {
 	PriceUSD        float64
 	DurationMinutes int
 	Path            []string
 	SelfTransfer    bool
+
+	Bundled               bool     `json:",omitempty"` // true: one bundled Google fare beat pricing outbound+return separately
+	TotalPriceUSD         float64  `json:",omitempty"` // round-trip only: the whole trip's price
+	ReturnPath            []string `json:",omitempty"`
+	ReturnPriceUSD        float64  `json:",omitempty"`
+	ReturnDurationMinutes int      `json:",omitempty"`
+	ReturnSelfTransfer    bool     `json:",omitempty"`
 }

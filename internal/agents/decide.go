@@ -19,10 +19,11 @@ The top-level "Spec" is always the current, up-to-date state — a follow-up may
 Choose exactly one action:
   "dispatch": run one more search with a new set of concrete arguments. On round 1 (no rounds yet), dispatch using the Spec's concrete fields exactly as given — it already carries sensible values/defaults. On a retry, adjust arguments based on what the last round's result showed (e.g. raise QueryBudget or MaxHours to see more of the search frontier, tighten MaxPrice, etc). Origin/Destination may be a plain city name rather than an IATA code (e.g. "Beijing", not "PEK") — that's expected for a multi-airport city, not a gap to fill in yourself: pass it through unchanged, the dispatched search resolves it into every airport that city has and keeps the cheapest, so never invent or guess a specific airport code the Spec didn't already give you.
   "ask_user": the request is genuinely underspecified — e.g. no departure date and nothing implying a date range, TripType still unknown (see below — this is common, don't skip it), or a place name that isn't recognizable as any real city or airport — not just "could be narrower." Set "Question" to one message covering every unresolved thing at once (e.g. "What's your departure date, and is this one-way or round-trip?") — never ask about just one gap and save the rest for a later round; each round is a full round-trip with the traveler, so collect everything you need in it. Spec.Notes explains *why* a field is blank (e.g. an unresolved date range) — when a note exists for a blank field, ask about that note's specifics instead of a generic re-ask; a generic re-ask of a question the traveler already answered reads as the agent having ignored them.
+  On the FIRST ask_user round only (RoundsSoFar has no earlier ask_user entry — don't repeat this on a later round, it'd read as nagging), also disclose what the search will otherwise assume: read Spec's own MaxHours/MaxPrice/MinLayoverMinutes/MaxLayoverMinutes/SearchRadiusKm (FormSpec has already filled these with real defaults, e.g. MaxHours 30, MaxPrice 0 meaning no cap) and add one sentence stating them as defaults the traveler can override, e.g. "If you have no preference, I'll default to up to 30 hours total travel time, no price cap, and layovers between 45 minutes and 12 hours." — so an assumption they'd have wanted to change surfaces now, not only once they see the final result.
   "finalize": stop and hand back what's been found, or an honest "didn't find one that fits" if nothing qualifies.
 Never choose "defer" — it exists in the type system but isn't wired to anything in this build.
 
-Judge each round's result against BOTH halves of the spec: concrete fields are already enforced by the search itself (never re-check those — a result violating MaxHours/MaxPrice simply won't appear), but SoftConstraints are plain language only you can judge — e.g. "no self-transfer / separate tickets" is violated by any result with SelfTransfer:true. A result violating a soft constraint is NOT "good enough," even if it's the only or cheapest option found: dispatch again with adjusted arguments instead of finalizing, unless you're genuinely out of ideas for how to adjust — then finalize, and say plainly in Reasoning that a soft constraint went unmet.
+Judge each round's result against BOTH halves of the spec: concrete fields are already enforced by the search itself (never re-check those — a result violating MaxHours/MaxPrice simply won't appear), but SoftConstraints are plain language only you can judge — e.g. "no self-transfer / separate tickets" is violated by any result with SelfTransfer:true (round-trip results: check OutboundSelfTransfer and ReturnSelfTransfer, either can be true independent of the other). A result violating a soft constraint is NOT "good enough," even if it's the only or cheapest option found: dispatch again with adjusted arguments instead of finalizing, unless you're genuinely out of ideas for how to adjust — then finalize, and say plainly in Reasoning that a soft constraint went unmet.
 
 For "dispatch", "Request" must be a JSON object with these fields (Go field names, exactly): Origin, Destination, TripType ("one_way" or "round_trip" — must already be resolved, never ""), DepartDate, ReturnDate (YYYY-MM-DD; only set when TripType is "round_trip"), MaxHours (float), QueryBudget (int), MaxPrice (int USD, 0 = no cap), MinLayoverMinutes, MaxLayoverMinutes (int minutes), SearchRadiusKm (float; only matters when Origin/Destination is a city name, not a specific airport).
 
@@ -38,20 +39,16 @@ Reply with EXACTLY one JSON object, no prose outside it, no markdown fences:
 func DecideNextAction(ctx context.Context, llm LLMClient, spec Spec, rounds []RoundRecord) (Decision, error) {
 	round := len(rounds) + 1
 	user := decideUserPrompt(spec, rounds)
-	raw, err := llm.Chat(ctx, decideSystemPrompt, user)
-	debugLog.Debug("DecideNextAction LLM call", "round", round, "system", decideSystemPrompt, "user", user, "raw_reply", raw)
-	if err != nil {
-		return Decision{}, fmt.Errorf("agents: LLM decide call: %w", err)
-	}
-
 	var reply struct {
 		Action    string
 		Request   *CollectRouteRequest
 		Question  string
 		Reasoning string
 	}
-	if err := json.Unmarshal([]byte(raw), &reply); err != nil {
-		return Decision{}, fmt.Errorf("agents: parsing LLM decision reply %q: %w", raw, err)
+	raw, err := chatJSON(ctx, llm, decideSystemPrompt, user, &reply)
+	debugLog.Debug("DecideNextAction LLM call", "round", round, "system", decideSystemPrompt, "user", user, "raw_reply", raw)
+	if err != nil {
+		return Decision{}, fmt.Errorf("agents: LLM decide call: %w", err)
 	}
 
 	switch Action(reply.Action) {
@@ -267,7 +264,7 @@ Write the literal reply text — plain prose, no markdown, a few sentences, no f
   - Lead with the outcome: the best itinerary's price, duration, route, and whether it's one ticket or self-transfer (call out the self-transfer risk plainly — no through checked bags, no rebooking if the first leg is delayed) — or an honest "didn't find one that fits" if every round came back empty.
   - Check the last round's Reasoning for an unmet soft constraint; if there is one, say plainly that it wasn't satisfied rather than presenting the result as fully matching what was asked.
   - MaxPrice 0 means no price cap was set — never describe it as "a $0 budget" or similar; only mention MaxPrice at all when it's nonzero.
-  - If Spec.TripType is "round_trip": say plainly that only the outbound flight was searched — this build's search doesn't book or price a return leg yet, whatever ReturnDate says — and that ReturnDate is recorded but not yet acted on. Never present the result as a round-trip fare or itinerary.
+  - If Spec.TripType is "round_trip": quote TotalPriceUSD as the trip's price, never the top-level PriceUSD (that field describes the outbound leg alone, and is 0 under a bundled fare — Bundled:true means Google's single round-trip ticket beat pricing outbound+return separately, so there's no separate outbound price to give). Under Bundled:true, PriceUSD and DurationMinutes are both 0 and mean nothing — never state "$0" or "0 minutes"; just don't mention a per-leg price or duration at all in that case. Say plainly which case it was: one bundled fare, or two separate tickets (Bundled:false) — the latter carries its own self-transfer risk per direction (OutboundSelfTransfer / ReturnSelfTransfer), independent of each other.
 
 Reply with EXACTLY one JSON object, no prose outside it, no markdown fences:
 {"Email": "the final reply, plain prose"}`
@@ -279,15 +276,11 @@ Reply with EXACTLY one JSON object, no prose outside it, no markdown fences:
 // price/route sentence back, unchanged).
 func DraftFinalEmail(ctx context.Context, llm LLMClient, spec Spec, rounds []RoundRecord) (string, error) {
 	user := "Write the final reply for this request:\n\n" + specAndRoundsJSON(spec, rounds)
-	raw, err := llm.Chat(ctx, draftFinalEmailSystemPrompt, user)
+	var reply struct{ Email string }
+	raw, err := chatJSON(ctx, llm, draftFinalEmailSystemPrompt, user, &reply)
 	debugLog.Debug("DraftFinalEmail LLM call", "system", draftFinalEmailSystemPrompt, "user", user, "raw_reply", raw)
 	if err != nil {
 		return "", fmt.Errorf("agents: LLM draft-final-email call: %w", err)
-	}
-
-	var reply struct{ Email string }
-	if err := json.Unmarshal([]byte(raw), &reply); err != nil {
-		return "", fmt.Errorf("agents: parsing LLM final-email reply %q: %w", raw, err)
 	}
 	if reply.Email == "" {
 		return "", fmt.Errorf("agents: LLM final-email reply had empty Email (raw reply: %s)", raw)
