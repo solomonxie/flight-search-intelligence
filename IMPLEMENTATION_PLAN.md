@@ -52,7 +52,7 @@ below, not this phase.
 - [x] `flight_offers_cache` table; uniform `created_at`/`updated_at`
       naming — `7d8090d`
 
-## Phase 2: Agent-loop decision core — LLM input/output, decide-next-step
+## Phase 2: Agent-loop decision core — LLM input/output, decide-next-step — done
 
 DESIGN.md "Agent loop" steps 1-2 and "Spec's concrete fields." Moved
 ahead of baggage/N-hop on purpose: those extend `routesearch.Params`,
@@ -76,10 +76,18 @@ Phase 1 (the loop to plug into).
       `pickCheapestFeasible`/`bestConnection` (`scoring.go`); wired to
       `googleflights.SearchParams` → `Query.MaxPrice` (already encoded)
       and up to `agents.Spec`
-- [ ] `agents.Spec`: add a date-window shape (reuse `FlexibleParams`'
+- [x] `agents.Spec`: add a date-window shape (reuse `FlexibleParams`'
       window/step fields) so `SearchFlexible` becomes a dispatchable tool
-      from the agent loop, not just `CollectRouteRequest` — deferred,
-      not needed to exercise the decision core itself
+      from the agent loop, not just `CollectRouteRequest` — `WindowDays`/
+      `StepDays` on `Spec` and `CollectRouteRequest`; `FormSpec` only sets
+      `WindowDays` from an explicit flexibility signal ("give or take N
+      days"), never from a vague date phrase alone (that stays
+      `DepartDate`'s own earliest-date rule); `dispatch.runFlexibleSearch`
+      routes a nonzero `WindowDays` to `SearchFlexible` and reports which
+      date won via `CollectRouteResult.ChosenDepartDate`/`ChosenReturnDate`
+      — verified live end to end (`TestAgentLoop_FlexibleDates`), plus a
+      dispatch-level test for both one-way and round-trip
+      (`internal/dispatch/search_test.go`)
 - [x] Real spec formation: turn free-text (the `-start` request text,
       `-signal` follow-ups) into `Spec`'s concrete fields +
       `SoftConstraints` via `LLMClient` — `agents.FormSpec`

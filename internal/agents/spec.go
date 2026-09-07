@@ -24,7 +24,21 @@ type Spec struct {
 	// one specific airport (see dispatch.resolveAirports) — e.g.
 	// "Vancouver" within the default 100km also considers Abbotsford.
 	// Meaningless when the field already names a specific airport.
-	SearchRadiusKm  float64
+	SearchRadiusKm float64
+	// WindowDays > 0 makes this a flexible-date request (see
+	// routesearch.FlexibleParams, which this reuses the shape of):
+	// DepartDate becomes the search window's *center*, scanned
+	// [-WindowDays, +WindowDays] for whichever date is cheapest, rather
+	// than a single fixed date. 0 (the default) means an exact date —
+	// only set this from an explicit flexibility signal in the text
+	// ("I'm flexible", "any day within a week of the 15th", "sometime
+	// around Christmas, +/- 3 days"), never inferred from a vague date
+	// phrase alone (that's DepartDate/ReturnDate's own job — see
+	// formSpecSystemPromptTemplate).
+	WindowDays int
+	// StepDays samples every StepDays within the window; 0 defaults to
+	// 1 (every day) — only meaningful when WindowDays > 0.
+	StepDays        int
 	SoftConstraints []string
 	// Notes carries forward *why* FormSpec left a field blank or unresolved
 	// (e.g. "Beijing has multiple airports (PEK/PKX), none specified") —
@@ -41,7 +55,7 @@ func (s Spec) toCollectRouteRequest() CollectRouteRequest {
 		Origin: s.Origin, Destination: s.Destination, TripType: s.TripType, DepartDate: s.DepartDate, ReturnDate: s.ReturnDate,
 		MaxHours: s.MaxHours, QueryBudget: s.QueryBudget, MaxPrice: s.MaxPrice,
 		MinLayoverMinutes: s.MinLayoverMinutes, MaxLayoverMinutes: s.MaxLayoverMinutes,
-		SearchRadiusKm: s.SearchRadiusKm,
+		SearchRadiusKm: s.SearchRadiusKm, WindowDays: s.WindowDays, StepDays: s.StepDays,
 	}
 }
 

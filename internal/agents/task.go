@@ -21,6 +21,13 @@ type CollectRouteRequest struct {
 	MinLayoverMinutes int
 	MaxLayoverMinutes int
 	SearchRadiusKm    float64 // see Spec.SearchRadiusKm
+	// WindowDays > 0 makes this a flexible-date search — see Spec.WindowDays;
+	// dispatch.runSearch routes it to routesearch.SearchFlexible instead of
+	// a fixed-date Search/SearchRoundTrip, scanning [DepartDate-WindowDays,
+	// DepartDate+WindowDays] for the cheapest date. StepDays samples every
+	// StepDays within that window (0 defaults to 1, every day).
+	WindowDays int
+	StepDays   int
 }
 
 // CollectRouteResult is the structured result a dispatched search returns —
@@ -30,6 +37,13 @@ type CollectRouteResult struct {
 	RequestID   string
 	QueriesUsed int
 	Results     []CollectRouteOffer
+	// ChosenDepartDate/ChosenReturnDate: only set for a flexible-date
+	// search (WindowDays > 0) — the date(s) that actually won the scan,
+	// which may differ from the DepartDate/ReturnDate that was asked
+	// (that was just the window's center). The final-email step needs
+	// this to say which date it actually found the price for.
+	ChosenDepartDate string `json:",omitempty"`
+	ChosenReturnDate string `json:",omitempty"`
 }
 
 // CollectRouteOffer is one itinerary — from the Pareto set
