@@ -26,16 +26,24 @@ import (
 // mechanical backstop, below).
 const formSpecSystemPromptTemplate = `You turn a traveler's free-text request (or follow-up reply) into this agent loop's structured Spec. Today's date is %s.
 
-You are given the existing Spec so far (all zero values for a brand-new request) as JSON, and new text to fold into it. Keep every already-set field unless the new text clearly changes it — this is additive, not a rewrite from scratch.
+You are given the existing Spec so far (all zero values for a brand-new request) as JSON, and new text to fold into it. Answer in two parts, in this order:
+
+PART 1 — Intention: classify what this new text is doing, relative to the existing Spec:
+  "new_request": this is the first message of a request, or describes a trip unrelated to anything already on file (a different origin/destination/trip entirely, not just a changed date or trip type on the same one).
+  "additional_info": fills in a field that was blank, or narrows a range that was wide — doesn't contradict any field that was already set.
+  "rewrite": sets an already-set field to a genuinely different value — e.g. "actually make it one-way" when TripType was "round_trip", a new destination replacing the old one, a date that supersedes rather than narrows the existing range. This matters downstream: a round already searched under the old value is no longer a valid answer to the rewritten request.
+  "question_about_result": the text isn't asking for a (new) search at all — it's a question about a result already given (e.g. "why no direct flights", "how long is the layover on that one"), answerable from the existing Spec/rounds without changing the Spec.
+
+PART 2 — Info: fold the new text into the Spec. Keep every already-set field unless the new text clearly changes it — this is additive, not a rewrite from scratch (an "additional_info" turn never touches an already-set field; a "rewrite" turn changes exactly the field(s) the text actually contradicts, leaving the rest alone).
 
 Spec's fields, and when to set each:
   Origin, Destination: a real, single-airport IATA code (3 uppercase letters) — the code an actual airport uses, never a metro/city code that covers several airports (e.g. Tokyo is NRT or HND, never "TYO"; London is LHR/LGW/STN/etc, never "LON"; New York is JFK/LGA/EWR, never "NYC") — ONLY when the text names or clearly implies one specific airport. Otherwise, when only a city is named — including a multi-airport city like Beijing or London — set the field to that city's plain name instead (e.g. "Beijing", "London"): a later step searches every airport in that city and keeps whichever comes back cheapest, so don't guess a specific airport the text didn't ask for, and don't leave the field blank just because the city has more than one.
   TripType: "one_way", "round_trip", or "" if the text gives no signal either way. Set this ONLY from an explicit signal — "round trip", "return", "back by/on/around X", a second distinct travel date, or (for one_way) "one-way"/"single trip"/"not coming back". A departure date alone, however specific or vague, is NOT a signal either way: never infer one_way just because no return was mentioned, and never infer round_trip just because a date phrase happens to span a range — leave TripType "" and let a later step ask, rather than guessing silently.
-  DepartDateFrom, DepartDateTo: YYYY-MM-DD, inclusive — the window departure may fall in. Resolve relative dates ("next month", "over Christmas") against today's date above. An exact date ("December 15th") sets both to the same value. A vague phrase ("end of year", "sometime in spring") genuinely names a *range*, not one day — don't collapse it to a single guess or invent a specific canonical definition; work out a reasonable span for what was actually said and set DepartDateFrom/To to its two ends (e.g. "end of year" might reasonably span roughly the back half of December — exact bounds depend on context, this is an estimate, not a rule to apply identically every time).
+  MinDepartDate, MaxDepartDate: YYYY-MM-DD, inclusive — the window departure may fall in. Resolve relative dates ("next month", "over Christmas") against today's date above. An exact date ("December 15th") sets both to the same value. A vague phrase ("end of year", "sometime in spring") genuinely names a *range*, not one day — don't collapse it to a single guess or invent a specific canonical definition; work out a reasonable span for what was actually said and set MinDepartDate/MaxDepartDate to its two ends (e.g. "end of year" might reasonably span roughly the back half of December — exact bounds depend on context, this is an estimate, not a rule to apply identically every time).
   "next <month name>" means the NEXT calendar occurrence of that month strictly after today — if that month number is <= today's month number, it's already happened this year, so it means that month IN THE FOLLOWING YEAR, not this year's (already-past) one. E.g. today 2026-09-07, "next Jan" -> 2027-01 (January 2026 already happened 8 months ago); today 2026-09-07, "next Nov" -> 2026-11 (November hasn't happened yet this year).
-  ReturnDateFrom, ReturnDateTo: only ever set when TripType is (or becomes, from this text) "round_trip" — stay "" regardless of DepartDateFrom/To otherwise. Must come from their own, distinct time expression found elsewhere in the text — never the departure phrase or range reused. A second period shows up two ways: joined directly ("December to next Jan", "leaving in June, back in July"), or introduced anywhere else in the text by an explicit return marker ("return in/on/around X", "back by X") — e.g. "round trip, end of year, return in next jan" has TWO periods: departure resolves "end of year" alone, return resolves "next Jan" alone (each per the range rule above). If the text gives only ONE time expression total for a round trip — e.g. "vancouver, end of year, round trip" — that's a single combined window for the whole trip, not separately for each leg: leave ReturnDateFrom/To exactly as they already were (blank, on a first message) and add a Note saying a return window is still needed (e.g. "round trip, but no return window given — only a departure window was mentioned"), rather than inventing a split of the one range into two.
+  MinReturnDate, MaxReturnDate: only ever set when TripType is (or becomes, from this text) "round_trip" — stay "" regardless of MinDepartDate/MaxDepartDate otherwise. Must come from their own, distinct time expression found elsewhere in the text — never the departure phrase or range reused. A second period shows up two ways: joined directly ("December to next Jan", "leaving in June, back in July"), or introduced anywhere else in the text by an explicit return marker ("return in/on/around X", "back by X") — e.g. "round trip, end of year, return in next jan" has TWO periods: departure resolves "end of year" alone, return resolves "next Jan" alone (each per the range rule above). If the text gives only ONE time expression total for a round trip — e.g. "vancouver, end of year, round trip" — that's a single combined window for the whole trip, not separately for each leg: leave MinReturnDate/MaxReturnDate exactly as they already were (blank, on a first message) and add a Note saying a return window is still needed (e.g. "round trip, but no return window given — only a departure window was mentioned"), rather than inventing a split of the one range into two.
   A round trip's return must never be resolved to land on or before the departure window — if straightforward date arithmetic would do that (e.g. a "next <month>" miscount), the intended year is next year instead.
-  RoundTripFrom, RoundTripTo (round_trip only): a hard outer bound both the departure and return date must fall within — set this ONLY from an explicit, absolute constraint on the whole trip's length or deadline (e.g. "I only have a month of paid leave", "I must be back by end of January no matter what", "the whole trip can't be more than 3 weeks"), never from an ordinary vague date phrase (that's DepartDateFrom/To's or ReturnDateFrom/To's own job above). If enough is already known to compute real dates (e.g. DepartDateFrom is set and the text says "one month"), set RoundTripFrom/To to actual YYYY-MM-DD values; if not enough is known yet, leave both "" and add a Note describing the constraint so the next step can ask what's missing. This exists so an absolute limit (limited leave, a hard deadline) is never silently violated by treating a wide departure/return window as if any combination within it were acceptable.
+  MinRoundTripDate, MaxRoundTripDate (round_trip only): a hard outer bound both the departure and return date must fall within — set this ONLY from an explicit, absolute constraint on the whole trip's length or deadline (e.g. "I only have a month of paid leave", "I must be back by end of January no matter what", "the whole trip can't be more than 3 weeks"), never from an ordinary vague date phrase (that's MinDepartDate/MaxDepartDate's or MinReturnDate/MaxReturnDate's own job above). If enough is already known to compute real dates (e.g. MinDepartDate is set and the text says "one month"), set MinRoundTripDate/MaxRoundTripDate to actual YYYY-MM-DD values; if not enough is known yet, leave both "" and add a Note describing the constraint so the next step can ask what's missing. This exists so an absolute limit (limited leave, a hard deadline) is never silently violated by treating a wide departure/return window as if any combination within it were acceptable.
   StepDays: sample every StepDays within a date range above; 0 (the default) means every day. Only raise this from an explicit request for coarser sampling ("check every few days") — never as a way to narrow a range you're unsure about; leaving a range wide with StepDays 0 is always safer than guessing a narrower one.
   MaxHours: max tolerable total elapsed trip time, in hours. Default 30 if the text doesn't say.
   QueryBudget: how many hub candidates the search may try. Default 20 if the text doesn't say.
@@ -45,8 +53,8 @@ Spec's fields, and when to set each:
   SoftConstraints: a plain-language list for anything else that matters but isn't one of the fields above — a judgment call needing context, not a threshold (e.g. "must be there for Christmas", "no self-transfer / separate tickets", "traveling with an infant"). Append new ones to whatever's already there; never drop an existing entry.
   Notes: a plain-language list, one entry per field you left genuinely blank *for a specific reason* the next step needs in order to ask a sharp follow-up instead of a generic one (e.g. an unresolved date range, or a place name that isn't a recognizable city or airport at all). A named multi-airport city is NOT one of these — that goes in Origin/Destination as the city name, per above, not a blank field with a note. Unlike SoftConstraints, Notes is not permanent: once the new text resolves what a note was about, drop that note — keep only notes still unresolved.
 
-Reply with EXACTLY one JSON object, no prose outside it, no markdown fences:
-{"Spec": {"Origin": "...", "Destination": "...", "TripType": "one_way"|"round_trip"|"", "DepartDateFrom": "...", "DepartDateTo": "...", "ReturnDateFrom": "...", "ReturnDateTo": "...", "RoundTripFrom": "...", "RoundTripTo": "...", "StepDays": 0, "MaxHours": 30, "QueryBudget": 20, "MaxPrice": 0, "MinLayoverMinutes": 120, "MaxLayoverMinutes": 720, "SearchRadiusKm": 100, "SoftConstraints": ["..."], "Notes": ["..."]}, "Reasoning": "one sentence on what you filled in or left blank and why"}`
+Reply with EXACTLY one JSON object, no prose outside it, no markdown fences — Intention and Info as their own nested objects, each with its own Reasoning:
+{"Intention": {"Type": "new_request"|"additional_info"|"rewrite"|"question_about_result", "Reasoning": "one sentence on why this text reads as that intention"}, "Info": {"Spec": {"Origin": "...", "Destination": "...", "TripType": "one_way"|"round_trip"|"", "MinDepartDate": "...", "MaxDepartDate": "...", "MinReturnDate": "...", "MaxReturnDate": "...", "MinRoundTripDate": "...", "MaxRoundTripDate": "...", "StepDays": 0, "MaxHours": 30, "QueryBudget": 20, "MaxPrice": 0, "MinLayoverMinutes": 120, "MaxLayoverMinutes": 720, "SearchRadiusKm": 100, "SoftConstraints": ["..."], "Notes": ["..."]}, "Reasoning": "one sentence on what you filled in, changed, or left blank and why"}}`
 
 // FormSpec turns existing (the spec so far — zero value for a new
 // request) plus text (the new email/CLI text to fold in) into an
@@ -63,15 +71,24 @@ func FormSpec(ctx context.Context, llm LLMClient, existing Spec, text string) (S
 	user := fmt.Sprintf("Existing spec so far:\n%s\n\nNew text to fold in:\n%s", existingJSON, text)
 
 	var reply struct {
-		Spec      Spec
-		Reasoning string
+		Intention struct {
+			Type      Intent
+			Reasoning string
+		}
+		Info struct {
+			Spec      Spec
+			Reasoning string
+		}
 	}
 	raw, err := chatJSON(ctx, llm, system, user, &reply)
 	debugLog.Debug("FormSpec LLM call", "system", system, "user", user, "raw_reply", raw)
 	if err != nil {
 		return Spec{}, "", fmt.Errorf("agents: LLM spec-formation call: %w", err)
 	}
-	return validateDates(normalizeDefaults(reply.Spec, existing)), reply.Reasoning, nil
+	spec := validateDates(normalizeDefaults(reply.Info.Spec, existing))
+	spec.LastIntent = reply.Intention.Type
+	spec.LastIntentReasoning = reply.Intention.Reasoning
+	return spec, reply.Info.Reasoning, nil
 }
 
 // validateDates catches date arithmetic the model got wrong rather than
@@ -89,13 +106,13 @@ func FormSpec(ctx context.Context, llm LLMClient, existing Spec, text string) (S
 //     DecideNextAction needs to ask about again) rather than letting a
 //     bad range silently reach dispatch.
 func validateDates(s Spec) Spec {
-	s.DepartDateFrom, s.DepartDateTo = orderedRange(s.DepartDateFrom, s.DepartDateTo)
-	s.ReturnDateFrom, s.ReturnDateTo = orderedRange(s.ReturnDateFrom, s.ReturnDateTo)
-	s.RoundTripFrom, s.RoundTripTo = orderedRange(s.RoundTripFrom, s.RoundTripTo)
+	s.MinDepartDate, s.MaxDepartDate = orderedRange(s.MinDepartDate, s.MaxDepartDate)
+	s.MinReturnDate, s.MaxReturnDate = orderedRange(s.MinReturnDate, s.MaxReturnDate)
+	s.MinRoundTripDate, s.MaxRoundTripDate = orderedRange(s.MinRoundTripDate, s.MaxRoundTripDate)
 
-	if s.TripType == "round_trip" && s.DepartDateTo != "" && s.ReturnDateFrom != "" && s.ReturnDateFrom <= s.DepartDateTo {
-		s.ReturnDateFrom, s.ReturnDateTo = "", ""
-		s.Notes = append(s.Notes, fmt.Sprintf("return window resolved on or before the departure window (ends %s) — likely a year miscount on a relative date; needs to be asked again", s.DepartDateTo))
+	if s.TripType == "round_trip" && s.MaxDepartDate != "" && s.MinReturnDate != "" && s.MinReturnDate <= s.MaxDepartDate {
+		s.MinReturnDate, s.MaxReturnDate = "", ""
+		s.Notes = append(s.Notes, fmt.Sprintf("return window resolved on or before the departure window (ends %s) — likely a year miscount on a relative date; needs to be asked again", s.MaxDepartDate))
 	}
 	return s
 }

@@ -76,7 +76,7 @@ func TestRunSearch_Flexible_OneWay(t *testing.T) {
 	deps := testDeps(t)
 	result, err := runSearch(context.Background(), deps, agents.CollectRouteRequest{
 		Origin: "YVR", Destination: "PEK", TripType: "one_way",
-		DepartDateFrom: "2026-12-12", DepartDateTo: "2026-12-18",
+		MinDepartDate: "2026-12-12", MaxDepartDate: "2026-12-18",
 		MaxHours: 30, QueryBudget: 10, MinLayoverMinutes: 45, MaxLayoverMinutes: 720, SearchRadiusKm: 100,
 		StepDays: 1,
 	})
@@ -101,8 +101,8 @@ func TestRunSearch_Flexible_RoundTrip(t *testing.T) {
 	deps := testDeps(t)
 	result, err := runSearch(context.Background(), deps, agents.CollectRouteRequest{
 		Origin: "YVR", Destination: "PEK", TripType: "round_trip",
-		DepartDateFrom: "2026-12-14", DepartDateTo: "2026-12-16",
-		ReturnDateFrom: "2026-12-21", ReturnDateTo: "2026-12-23",
+		MinDepartDate: "2026-12-14", MaxDepartDate: "2026-12-16",
+		MinReturnDate: "2026-12-21", MaxReturnDate: "2026-12-23",
 		MaxHours: 30, QueryBudget: 20, MinLayoverMinutes: 45, MaxLayoverMinutes: 720, SearchRadiusKm: 100,
 		StepDays: 1,
 	})
