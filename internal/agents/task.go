@@ -20,20 +20,21 @@ type CollectRouteRequest struct {
 	// range(s) and keeping the cheapest, instead of the fixed-date
 	// Search/SearchRoundTrip).
 	MinDepartDate string
-	MaxDepartDate   string
+	MaxDepartDate string
 	MinReturnDate string
-	MaxReturnDate   string
+	MaxReturnDate string
 	// MinRoundTripDate/MaxRoundTripDate: see Spec.MinRoundTripDate's doc — an outer
 	// eligibility bound both dates must fall within (e.g. limited paid
 	// leave), narrower than the ranges above, which only control what
 	// gets priced.
-	MinRoundTripDate     string
-	MaxRoundTripDate       string
+	MinRoundTripDate  string
+	MaxRoundTripDate  string
 	MaxHours          float64
 	QueryBudget       int
 	MaxPrice          int // USD hard ceiling on the whole trip; 0 = no cap
 	MinLayoverMinutes int
 	MaxLayoverMinutes int
+	CheckedBags       int     // see Spec.CheckedBags
 	SearchRadiusKm    float64 // see Spec.SearchRadiusKm
 	// StepDays samples every StepDays within a date range above; 0
 	// defaults to 1 (every day). Only matters when a range is genuinely

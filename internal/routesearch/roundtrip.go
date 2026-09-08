@@ -64,6 +64,7 @@ func SearchRoundTrip(ctx context.Context, deps Deps, p Params, returnDate string
 	log.Info("querying bundled round-trip baseline")
 	bundledOffers, live, err := deps.searchOffers(ctx, googleflights.SearchParams{
 		Origin: p.Origin, Destination: p.Destination, DepartureDate: p.DepartDate, ReturnDate: returnDate,
+		CheckedBags: checkedBagsPtr(p.CheckedBags),
 	}, p.ForceRefresh)
 	if live {
 		plan.QueriesUsed++

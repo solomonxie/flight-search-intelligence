@@ -93,7 +93,8 @@ func searchNHop(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 	// beat, self-transfer risk and extra stops considered.
 	log.Info("nhop: querying baseline direct route")
 	baseOffers, live, err := deps.searchOffers(ctx, googleflights.SearchParams{
-		Origin: p.Origin, Destination: p.Destination, DepartureDate: p.DepartDate, MaxPrice: maxPricePtr(p.MaxPrice),
+		Origin: p.Origin, Destination: p.Destination, DepartureDate: p.DepartDate,
+		MaxPrice: maxPricePtr(p.MaxPrice), CheckedBags: checkedBagsPtr(p.CheckedBags),
 	}, p.ForceRefresh)
 	if live {
 		queriesUsed++
@@ -136,7 +137,7 @@ func searchNHop(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 		log.Info("nhop: querying edge", "from", edge.From.node(), "to", edge.To, "lb_usd", edge.LB, "legs_so_far", edge.From.legs())
 		offers, liveQ, err := deps.searchOffers(ctx, googleflights.SearchParams{
 			Origin: edge.From.node(), Destination: edge.To, DepartureDate: queryDate,
-			MaxStops: googleflights.NonstopOnly(),
+			MaxStops: googleflights.NonstopOnly(), CheckedBags: checkedBagsPtr(p.CheckedBags),
 		}, p.ForceRefresh)
 		if liveQ {
 			queriesUsed++

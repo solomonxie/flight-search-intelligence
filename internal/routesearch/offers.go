@@ -23,7 +23,7 @@ const offersCacheFreshness = 24 * time.Hour
 // against their query budget — a cache hit costs nothing.
 func (d Deps) searchOffers(ctx context.Context, params googleflights.SearchParams, forceRefresh bool) ([]googleflights.Offer, bool, error) {
 	if !forceRefresh {
-		if cached, createdAt, ok, err := d.Catalog.CachedOffers(ctx, params.Origin, params.Destination, params.DepartureDate, params.ReturnDate, offersCacheFreshness); err == nil && ok {
+		if cached, createdAt, ok, err := d.Catalog.CachedOffers(ctx, params.Origin, params.Destination, params.DepartureDate, params.ReturnDate, checkedBagsInt(params.CheckedBags), offersCacheFreshness); err == nil && ok {
 			var cachedOffers []googleflights.Offer
 			if err := json.Unmarshal(cached, &cachedOffers); err == nil {
 				d.Logger.Info("offers cache hit", "origin", params.Origin, "destination", params.Destination,
@@ -54,9 +54,18 @@ func (d Deps) saveOffersCache(ctx context.Context, params googleflights.SearchPa
 		return
 	}
 	if err := d.Catalog.SaveOffersCache(ctx, params.Origin, params.Destination, params.DepartureDate, params.ReturnDate,
-		"google_flights", b, time.Now()); err != nil {
+		checkedBagsInt(params.CheckedBags), "google_flights", b, time.Now()); err != nil {
 		d.Logger.Warn("saving offers cache failed", "error", err)
 	}
+}
+
+// checkedBagsInt reads back the bag count a *int googleflights.SearchParams
+// carries (nil = not specified) as the plain int the cache key wants.
+func checkedBagsInt(p *int) int {
+	if p == nil {
+		return 0
+	}
+	return *p
 }
 
 // recordOffers persists every scraped offer into the shared flight_prices
