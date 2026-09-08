@@ -75,9 +75,10 @@ func testDeps(t *testing.T) routesearch.Deps {
 func TestRunSearch_Flexible_OneWay(t *testing.T) {
 	deps := testDeps(t)
 	result, err := runSearch(context.Background(), deps, agents.CollectRouteRequest{
-		Origin: "YVR", Destination: "PEK", TripType: "one_way", DepartDate: "2026-12-15",
-		MaxHours: 30, QueryBudget: 5, MinLayoverMinutes: 45, MaxLayoverMinutes: 720, SearchRadiusKm: 100,
-		WindowDays: 3, StepDays: 1,
+		Origin: "YVR", Destination: "PEK", TripType: "one_way",
+		DepartDateFrom: "2026-12-12", DepartDateTo: "2026-12-18",
+		MaxHours: 30, QueryBudget: 10, MinLayoverMinutes: 45, MaxLayoverMinutes: 720, SearchRadiusKm: 100,
+		StepDays: 1,
 	})
 	if err != nil {
 		t.Fatalf("runSearch: %v", err)
@@ -99,9 +100,11 @@ func TestRunSearch_Flexible_OneWay(t *testing.T) {
 func TestRunSearch_Flexible_RoundTrip(t *testing.T) {
 	deps := testDeps(t)
 	result, err := runSearch(context.Background(), deps, agents.CollectRouteRequest{
-		Origin: "YVR", Destination: "PEK", TripType: "round_trip", DepartDate: "2026-12-15", ReturnDate: "2026-12-22",
-		MaxHours: 30, QueryBudget: 5, MinLayoverMinutes: 45, MaxLayoverMinutes: 720, SearchRadiusKm: 100,
-		WindowDays: 3, StepDays: 1,
+		Origin: "YVR", Destination: "PEK", TripType: "round_trip",
+		DepartDateFrom: "2026-12-14", DepartDateTo: "2026-12-16",
+		ReturnDateFrom: "2026-12-21", ReturnDateTo: "2026-12-23",
+		MaxHours: 30, QueryBudget: 20, MinLayoverMinutes: 45, MaxLayoverMinutes: 720, SearchRadiusKm: 100,
+		StepDays: 1,
 	})
 	if err != nil {
 		t.Fatalf("runSearch: %v", err)

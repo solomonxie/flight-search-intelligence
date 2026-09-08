@@ -10,24 +10,35 @@ package agents
 // cmd/collector depends on this type; this package does not depend on
 // cmd/collector, keeping the import direction one-way.
 type CollectRouteRequest struct {
-	Origin            string
-	Destination       string
-	TripType          string // "one_way" | "round_trip" | "" (unresolved) — see Spec.TripType; dispatch.runSearch routes "round_trip" to routesearch.SearchRoundTrip instead of the plain one-way Search
-	DepartDate        string
-	ReturnDate        string
+	Origin      string
+	Destination string
+	TripType    string // "one_way" | "round_trip" | "" (unresolved) — see Spec.TripType; dispatch.runSearch routes "round_trip" to routesearch.SearchRoundTrip instead of the plain one-way Search
+	// DepartDateFrom/DepartDateTo, ReturnDateFrom/DateTo: see
+	// Spec.DepartDateFrom's doc — From == To is an exact date; From < To
+	// makes this a flexible search (dispatch.runSearch routes it to
+	// routesearch.SearchDateRange, pricing every date/combination in the
+	// range(s) and keeping the cheapest, instead of the fixed-date
+	// Search/SearchRoundTrip).
+	DepartDateFrom string
+	DepartDateTo   string
+	ReturnDateFrom string
+	ReturnDateTo   string
+	// RoundTripFrom/RoundTripTo: see Spec.RoundTripFrom's doc — an outer
+	// eligibility bound both dates must fall within (e.g. limited paid
+	// leave), narrower than the ranges above, which only control what
+	// gets priced.
+	RoundTripFrom     string
+	RoundTripTo       string
 	MaxHours          float64
 	QueryBudget       int
 	MaxPrice          int // USD hard ceiling on the whole trip; 0 = no cap
 	MinLayoverMinutes int
 	MaxLayoverMinutes int
 	SearchRadiusKm    float64 // see Spec.SearchRadiusKm
-	// WindowDays > 0 makes this a flexible-date search — see Spec.WindowDays;
-	// dispatch.runSearch routes it to routesearch.SearchFlexible instead of
-	// a fixed-date Search/SearchRoundTrip, scanning [DepartDate-WindowDays,
-	// DepartDate+WindowDays] for the cheapest date. StepDays samples every
-	// StepDays within that window (0 defaults to 1, every day).
-	WindowDays int
-	StepDays   int
+	// StepDays samples every StepDays within a date range above; 0
+	// defaults to 1 (every day). Only matters when a range is genuinely
+	// flexible.
+	StepDays int
 }
 
 // CollectRouteResult is the structured result a dispatched search returns —
@@ -38,10 +49,11 @@ type CollectRouteResult struct {
 	QueriesUsed int
 	Results     []CollectRouteOffer
 	// ChosenDepartDate/ChosenReturnDate: only set for a flexible-date
-	// search (WindowDays > 0) — the date(s) that actually won the scan,
-	// which may differ from the DepartDate/ReturnDate that was asked
-	// (that was just the window's center). The final-email step needs
-	// this to say which date it actually found the price for.
+	// search (a genuine range on either end) — the date(s) that actually
+	// won the scan, which may differ from what was asked since a range's
+	// endpoints only bound what gets priced, not which date wins. The
+	// final-email step needs this to say which date it actually found
+	// the price for.
 	ChosenDepartDate string `json:",omitempty"`
 	ChosenReturnDate string `json:",omitempty"`
 }

@@ -25,7 +25,7 @@ Never choose "defer" — it exists in the type system but isn't wired to anythin
 
 Judge each round's result against BOTH halves of the spec: concrete fields are already enforced by the search itself (never re-check those — a result violating MaxHours/MaxPrice simply won't appear), but SoftConstraints are plain language only you can judge — e.g. "no self-transfer / separate tickets" is violated by any result with SelfTransfer:true (round-trip results: check OutboundSelfTransfer and ReturnSelfTransfer, either can be true independent of the other). A result violating a soft constraint is NOT "good enough," even if it's the only or cheapest option found: dispatch again with adjusted arguments instead of finalizing, unless you're genuinely out of ideas for how to adjust — then finalize, and say plainly in Reasoning that a soft constraint went unmet.
 
-For "dispatch", "Request" must be a JSON object with these fields (Go field names, exactly): Origin, Destination, TripType ("one_way" or "round_trip" — must already be resolved, never ""), DepartDate, ReturnDate (YYYY-MM-DD; only set when TripType is "round_trip"), MaxHours (float), QueryBudget (int), MaxPrice (int USD, 0 = no cap), MinLayoverMinutes, MaxLayoverMinutes (int minutes), SearchRadiusKm (float; only matters when Origin/Destination is a city name, not a specific airport), WindowDays, StepDays (int — copy straight from Spec.WindowDays/StepDays; a nonzero WindowDays turns this into a flexible-date search scanning DepartDate +/- WindowDays for the cheapest day instead of pricing DepartDate alone — never set these yourself from a vague date phrase, only carry forward what Spec already has, since FormSpec is what decides whether the traveler actually asked for flexibility).
+For "dispatch", "Request" must be a JSON object with these fields (Go field names, exactly): Origin, Destination, TripType ("one_way" or "round_trip" — must already be resolved, never ""), DepartDateFrom, DepartDateTo, ReturnDateFrom, ReturnDateTo (YYYY-MM-DD; Return* only set when TripType is "round_trip"), RoundTripFrom, RoundTripTo (YYYY-MM-DD, only if Spec has them — an absolute outer bound, e.g. limited leave), StepDays (int), MaxHours (float), QueryBudget (int), MaxPrice (int USD, 0 = no cap), MinLayoverMinutes, MaxLayoverMinutes (int minutes), SearchRadiusKm (float; only matters when Origin/Destination is a city name, not a specific airport). Copy every one of these straight from the top-level Spec's own same-named field — never invent or narrow a date range yourself, that judgment call already happened in FormSpec; a From/To pair where From < To is a real range to search, not a mistake to collapse.
 
 Reply with EXACTLY one JSON object, no prose outside it, no markdown fences:
 {"Action": "dispatch"|"ask_user"|"finalize", "Request": {...only for dispatch...}, "Question": "...only for ask_user...", "Reasoning": "one or two sentences, always present"}`
@@ -154,14 +154,14 @@ func missingRequiredFields(req CollectRouteRequest) []string {
 	if req.Destination == "" {
 		missing = append(missing, "your destination city or airport")
 	}
-	if req.DepartDate == "" {
+	if req.DepartDateFrom == "" {
 		missing = append(missing, "your departure date")
 	}
 	switch req.TripType {
 	case "":
 		missing = append(missing, "whether this is one-way or round-trip")
 	case "round_trip":
-		if req.ReturnDate == "" {
+		if req.ReturnDateFrom == "" {
 			missing = append(missing, "your return date")
 		}
 	}
@@ -228,11 +228,23 @@ func fillDispatchDefaults(req CollectRouteRequest, spec Spec, rounds []RoundReco
 	if req.TripType == "" {
 		req.TripType = fallback.TripType
 	}
-	if req.DepartDate == "" {
-		req.DepartDate = fallback.DepartDate
+	if req.DepartDateFrom == "" {
+		req.DepartDateFrom = fallback.DepartDateFrom
 	}
-	if req.ReturnDate == "" {
-		req.ReturnDate = fallback.ReturnDate
+	if req.DepartDateTo == "" {
+		req.DepartDateTo = fallback.DepartDateTo
+	}
+	if req.ReturnDateFrom == "" {
+		req.ReturnDateFrom = fallback.ReturnDateFrom
+	}
+	if req.ReturnDateTo == "" {
+		req.ReturnDateTo = fallback.ReturnDateTo
+	}
+	if req.RoundTripFrom == "" {
+		req.RoundTripFrom = fallback.RoundTripFrom
+	}
+	if req.RoundTripTo == "" {
+		req.RoundTripTo = fallback.RoundTripTo
 	}
 	if req.MaxHours == 0 {
 		req.MaxHours = fallback.MaxHours
@@ -252,9 +264,6 @@ func fillDispatchDefaults(req CollectRouteRequest, spec Spec, rounds []RoundReco
 	if req.SearchRadiusKm == 0 {
 		req.SearchRadiusKm = fallback.SearchRadiusKm
 	}
-	if req.WindowDays == 0 {
-		req.WindowDays = fallback.WindowDays
-	}
 	if req.StepDays == 0 {
 		req.StepDays = fallback.StepDays
 	}
@@ -269,9 +278,9 @@ const draftFinalEmailSystemPrompt = `You write the final reply to a traveler who
 Write the literal reply text — plain prose, no markdown, a few sentences, no filler ("I hope this helps," restating the whole Spec back at them):
   - Lead with the outcome: the best itinerary's price, duration, route, and whether it's one ticket or self-transfer (call out the self-transfer risk plainly — no through checked bags, no rebooking if the first leg is delayed) — or an honest "didn't find one that fits" if every round came back empty.
   - Check the last round's Reasoning for an unmet soft constraint; if there is one, say plainly that it wasn't satisfied rather than presenting the result as fully matching what was asked.
-  - MaxPrice 0 means no price cap was set — never describe it as "a $0 budget" or similar; only mention MaxPrice at all when it's nonzero.
+  - MaxPrice 0 means no price cap was set — never describe it as "a $0 budget" or similar; only mention MaxPrice at all when it's nonzero. QueryBudget is a completely different thing and never a dollar figure — it's how many candidate searches the algorithm was allowed to try, not a price; never say a result "exceeds" or "meets" QueryBudget, and never call it "your $N budget."
   - If Spec.TripType is "round_trip": quote TotalPriceUSD as the trip's price, never the top-level PriceUSD (that field describes the outbound leg alone, and is 0 under a bundled fare — Bundled:true means Google's single round-trip ticket beat pricing outbound+return separately, so there's no separate outbound price to give). Under Bundled:true, PriceUSD and DurationMinutes are both 0 and mean nothing — never state "$0" or "0 minutes"; just don't mention a per-leg price or duration at all in that case. Say plainly which case it was: one bundled fare, or two separate tickets (Bundled:false) — the latter carries its own self-transfer risk per direction (OutboundSelfTransfer / ReturnSelfTransfer), independent of each other.
-  - If a round's Result has ChosenDepartDate (a flexible-date search, Spec.WindowDays > 0): that's the actual date being priced, and it can differ from Spec.DepartDate (which was only the window's center) — say plainly which date won and, if it moved, that it was the cheapest day found within the requested window (ChosenReturnDate too, for a round trip).
+  - If a round's Result has ChosenDepartDate (a flexible-date search, where DepartDateFrom < DepartDateTo or ReturnDateFrom < ReturnDateTo): that's the actual date being priced, and it can differ from the requested range's own endpoints — say plainly which date won and, if it wasn't the range's first day, that it was the cheapest one found within the requested window (ChosenReturnDate too, for a round trip).
 
 Reply with EXACTLY one JSON object, no prose outside it, no markdown fences:
 {"Email": "the final reply, plain prose"}`

@@ -30,13 +30,26 @@ func bookingLink(rounds []RoundRecord) string {
 	}
 
 	req := round.Decision.Request
+	// A flexible search's request only carries the range that was
+	// priced; ChosenDepartDate/ChosenReturnDate (set once the search
+	// actually ran) is the real date that won and what the link should
+	// point at — DepartDateFrom is just the fallback for a non-flexible
+	// exact search, where From already equals the one date searched.
+	depart := req.DepartDateFrom
+	if round.Result.ChosenDepartDate != "" {
+		depart = round.Result.ChosenDepartDate
+	}
 	params := googleflights.SearchParams{
 		Origin:        origin,
 		Destination:   destination,
-		DepartureDate: req.DepartDate,
+		DepartureDate: depart,
 	}
 	if req.TripType == "round_trip" {
-		params.ReturnDate = req.ReturnDate
+		ret := req.ReturnDateFrom
+		if round.Result.ChosenReturnDate != "" {
+			ret = round.Result.ChosenReturnDate
+		}
+		params.ReturnDate = ret
 	}
 	return googleflights.SearchURL(params)
 }

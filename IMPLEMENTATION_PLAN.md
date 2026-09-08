@@ -76,18 +76,31 @@ Phase 1 (the loop to plug into).
       `pickCheapestFeasible`/`bestConnection` (`scoring.go`); wired to
       `googleflights.SearchParams` → `Query.MaxPrice` (already encoded)
       and up to `agents.Spec`
-- [x] `agents.Spec`: add a date-window shape (reuse `FlexibleParams`'
-      window/step fields) so `SearchFlexible` becomes a dispatchable tool
-      from the agent loop, not just `CollectRouteRequest` — `WindowDays`/
-      `StepDays` on `Spec` and `CollectRouteRequest`; `FormSpec` only sets
-      `WindowDays` from an explicit flexibility signal ("give or take N
-      days"), never from a vague date phrase alone (that stays
-      `DepartDate`'s own earliest-date rule); `dispatch.runFlexibleSearch`
-      routes a nonzero `WindowDays` to `SearchFlexible` and reports which
-      date won via `CollectRouteResult.ChosenDepartDate`/`ChosenReturnDate`
-      — verified live end to end (`TestAgentLoop_FlexibleDates`), plus a
-      dispatch-level test for both one-way and round-trip
-      (`internal/dispatch/search_test.go`)
+- [x] `agents.Spec`: add a date-range shape so date search becomes a
+      dispatchable tool from the agent loop, not just
+      `CollectRouteRequest` — superseded its own first cut (a single
+      center date + `WindowDays`/`StepDays`) with independent
+      `DepartDateFrom`/`To` and `ReturnDateFrom`/`To` ranges plus
+      `RoundTripFrom`/`To` (an outer eligibility bound, e.g. limited paid
+      leave — distinct from the ranges, which only control what gets
+      *priced*) once a live run showed the coupled single-window model
+      couldn't express "depart and return each genuinely independently
+      flexible" or "make sure a hard leave-length constraint is never
+      violated." `routesearch.SearchDateRange` (`daterange.go`) prices
+      every combination in the ranges (a real depart x return grid —
+      window² queries, an accepted cost tradeoff, not scaled back to
+      window+length automatically: prefer the still-available
+      `FlexibleParams.TripLengthDays` coupled case when the trip length
+      is actually fixed, since that's only window queries).
+      `dispatch.runDateRangeSearch` routes a request with a genuine
+      range on either end to it and reports which combination won via
+      `CollectRouteResult.ChosenDepartDate`/`ChosenReturnDate` — verified
+      live end to end (`TestAgentLoop_FlexibleDates`,
+      `TestAgentLoop_NextMonthCrossesYearBoundary`), a dispatch-level
+      test for both trip types (`internal/dispatch/search_test.go`), and
+      a routesearch-level test proving the eligibility bound actually
+      excludes a cheaper-but-ineligible combination in favor of the
+      cheapest eligible one (`internal/routesearch/daterange_test.go`)
 - [x] Real spec formation: turn free-text (the `-start` request text,
       `-signal` follow-ups) into `Spec`'s concrete fields +
       `SoftConstraints` via `LLMClient` — `agents.FormSpec`

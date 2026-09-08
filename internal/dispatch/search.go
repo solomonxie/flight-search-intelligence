@@ -14,7 +14,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
-	"time"
 
 	"flight-search-intelligence/internal/agents"
 	"flight-search-intelligence/internal/catalog"
@@ -61,22 +60,24 @@ func RunTask(ctx context.Context, db *catalog.SQLite, deps routesearch.Deps, tas
 	return agents.RecordTaskResult(ctx, db, taskID)
 }
 
-// runSearch wraps internal/routesearch.Search (one-way),
-// routesearch.SearchRoundTrip (round-trip, picked by req.TripType), or
-// routesearch.SearchFlexible (a date window, picked by req.WindowDays)
-// as the unit RunTask dispatches to. req.Origin/req.Destination may each be a
-// real IATA code or a plain city name (FormSpec fills in a city name
-// rather than guessing when a multi-airport city like Beijing or London
-// is named but no specific airport is) — resolveAirports expands either
-// into the airport(s) to actually search, and a city with N candidates
-// fans out into one search call per candidate pair, merged into one
-// combined result spanning every airport tried. Trims the routesearch
-// plan down to agents.CollectRouteResult — the full plan
-// (candidate-by-candidate audit trail) stays in the store via
-// routesearch's own catalog write, not duplicated into the task's
-// result_json; with more than one candidate pair, only the last pair's
-// plan.RequestID survives into CollectRouteResult.RequestID (the catalog
-// holds every pair's own plan under its own request id regardless).
+// runSearch wraps internal/routesearch.Search (one-way, exact date),
+// routesearch.SearchRoundTrip (round-trip, exact dates), or
+// routesearch.SearchDateRange (either TripType, picked whenever a
+// date's From differs from its To — a genuine range to search, not a
+// single date) as the unit RunTask dispatches to. req.Origin/
+// req.Destination may each be a real IATA code or a plain city name
+// (FormSpec fills in a city name rather than guessing when a multi-
+// airport city like Beijing or London is named but no specific airport
+// is) — resolveAirports expands either into the airport(s) to actually
+// search, and a city with N candidates fans out into one search call
+// per candidate pair, merged into one combined result spanning every
+// airport tried. Trims the routesearch plan down to
+// agents.CollectRouteResult — the full plan (candidate-by-candidate
+// audit trail) stays in the store via routesearch's own catalog write,
+// not duplicated into the task's result_json; with more than one
+// candidate pair, only the last pair's plan.RequestID survives into
+// CollectRouteResult.RequestID (the catalog holds every pair's own plan
+// under its own request id regardless).
 func runSearch(ctx context.Context, deps routesearch.Deps, req agents.CollectRouteRequest) (agents.CollectRouteResult, error) {
 	radiusKm := req.SearchRadiusKm
 	if radiusKm <= 0 {
@@ -91,10 +92,13 @@ func runSearch(ctx context.Context, deps routesearch.Deps, req agents.CollectRou
 		return agents.CollectRouteResult{}, fmt.Errorf("dispatch: resolving destination %q: %w", req.Destination, err)
 	}
 
-	if req.WindowDays > 0 {
-		return runFlexibleSearch(ctx, deps, req, origins, destinations)
+	roundTrip := req.TripType == "round_trip" && req.ReturnDateFrom != ""
+	flexible := req.DepartDateFrom != req.DepartDateTo || (roundTrip && req.ReturnDateFrom != req.ReturnDateTo)
+
+	if flexible {
+		return runDateRangeSearch(ctx, deps, req, origins, destinations, roundTrip)
 	}
-	if req.TripType == "round_trip" && req.ReturnDate != "" {
+	if roundTrip {
 		return runRoundTripSearch(ctx, deps, req, origins, destinations)
 	}
 
@@ -106,7 +110,7 @@ func runSearch(ctx context.Context, deps routesearch.Deps, req agents.CollectRou
 			plan, err := routesearch.Search(ctx, deps, routesearch.Params{
 				Origin:            o,
 				Destination:       d,
-				DepartDate:        req.DepartDate,
+				DepartDate:        req.DepartDateFrom,
 				MaxHours:          req.MaxHours,
 				QueryBudget:       req.QueryBudget,
 				MaxPrice:          req.MaxPrice,
@@ -155,14 +159,14 @@ func runRoundTripSearch(ctx context.Context, deps routesearch.Deps, req agents.C
 			plan, err := routesearch.SearchRoundTrip(ctx, deps, routesearch.Params{
 				Origin:            o,
 				Destination:       d,
-				DepartDate:        req.DepartDate,
+				DepartDate:        req.DepartDateFrom,
 				MaxHours:          req.MaxHours,
 				QueryBudget:       req.QueryBudget,
 				MaxPrice:          req.MaxPrice,
 				MinLayoverMinutes: req.MinLayoverMinutes,
 				MaxLayoverMinutes: req.MaxLayoverMinutes,
 				PricePerMile:      0.08,
-			}, req.ReturnDate)
+			}, req.ReturnDateFrom)
 			if err != nil {
 				lastErr = err // one candidate airport pair failing shouldn't sink every other candidate
 				continue
@@ -194,36 +198,24 @@ func runRoundTripSearch(ctx context.Context, deps routesearch.Deps, req agents.C
 	return out, nil
 }
 
-// runFlexibleSearch is runSearch's WindowDays > 0 branch:
-// routesearch.SearchFlexible per origin/destination candidate pair — a
-// cheap per-date baseline scan across [DepartDate-WindowDays,
-// DepartDate+WindowDays] (Phase A), then the full hub search on
-// whichever date won (Phase B). Handles either TripType:
-// SearchFlexible itself branches on FlexibleParams.RoundTrip, running
-// Search or SearchRoundTrip for Phase B. Like round-trip, this isn't
-// pareto-merged across candidate airports — each pair reduces to one
-// chosen date and one best result, so "cheapest across pairs" is the
-// natural way to compare them.
-func runFlexibleSearch(ctx context.Context, deps routesearch.Deps, req agents.CollectRouteRequest, origins, destinations []string) (agents.CollectRouteResult, error) {
-	roundTrip := req.TripType == "round_trip" && req.ReturnDate != ""
-	var tripLengthDays int
-	if roundTrip {
-		if depart, err := time.Parse("2006-01-02", req.DepartDate); err == nil {
-			if ret, err := time.Parse("2006-01-02", req.ReturnDate); err == nil {
-				tripLengthDays = int(ret.Sub(depart).Hours() / 24)
-			}
-		}
-	}
-
+// runDateRangeSearch is runSearch's flexible branch (a genuine range on
+// either end): routesearch.SearchDateRange per origin/destination
+// candidate pair — prices every date/combination in the range(s) (Phase
+// A), then the full hub search on whichever won (Phase B). Handles
+// either TripType. Like round-trip, this isn't pareto-merged across
+// candidate airports — each pair reduces to one chosen date and one
+// best result, so "cheapest across pairs" is the natural way to compare
+// them.
+func runDateRangeSearch(ctx context.Context, deps routesearch.Deps, req agents.CollectRouteRequest, origins, destinations []string, roundTrip bool) (agents.CollectRouteResult, error) {
 	out := agents.CollectRouteResult{}
 	var best *routesearch.FlexiblePlan
 	var bestPrice float64
 	var lastErr error
 	for _, o := range origins {
 		for _, d := range destinations {
-			plan, err := routesearch.SearchFlexible(ctx, deps, routesearch.FlexibleParams{
+			plan, err := routesearch.SearchDateRange(ctx, deps, routesearch.DateRangeParams{
 				Base: routesearch.Params{
-					Origin: o, Destination: d, DepartDate: req.DepartDate,
+					Origin: o, Destination: d,
 					MaxHours:          req.MaxHours,
 					QueryBudget:       req.QueryBudget,
 					MaxPrice:          req.MaxPrice,
@@ -232,9 +224,13 @@ func runFlexibleSearch(ctx context.Context, deps routesearch.Deps, req agents.Co
 					PricePerMile:      0.08,
 				},
 				RoundTrip:      roundTrip,
-				TripLengthDays: tripLengthDays,
-				WindowDays:     req.WindowDays,
+				DepartFrom:     req.DepartDateFrom,
+				DepartTo:       req.DepartDateTo,
+				ReturnFrom:     req.ReturnDateFrom,
+				ReturnTo:       req.ReturnDateTo,
 				StepDays:       req.StepDays,
+				AvailableFrom:  req.RoundTripFrom,
+				AvailableUntil: req.RoundTripTo,
 			})
 			if err != nil {
 				lastErr = err // one candidate airport pair failing shouldn't sink every other candidate
