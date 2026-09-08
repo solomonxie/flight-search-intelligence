@@ -49,12 +49,13 @@ Spec's fields, and when to set each:
   QueryBudget: how many hub candidates the search may try. Default 20 if the text doesn't say.
   MaxPrice: hard USD price ceiling, 0 = none. Only set this from an explicit price/budget the text actually states.
   MinLayoverMinutes, MaxLayoverMinutes: default 120 and 720 (2 hours and 12 hours — comfortable, not rushed) if the text doesn't say otherwise.
+  CheckedBags: number of checked bags for the whole trip. 0 (the default) means the text never mentioned bags — only set this from an explicit count ("2 checked bags", "traveling with a suitcase" -> 1).
   SearchRadiusKm: how far (km) around a named city's center to also consider alternate airports — only matters when Origin/Destination is a city name rather than one specific airport. Default 100 if the text doesn't say; only override this from an explicit distance the traveler states (e.g. "within 50km of Beijing", "airports up to 200km out are fine").
   SoftConstraints: a plain-language list for anything else that matters but isn't one of the fields above — a judgment call needing context, not a threshold (e.g. "must be there for Christmas", "no self-transfer / separate tickets", "traveling with an infant"). Append new ones to whatever's already there; never drop an existing entry.
   Notes: a plain-language list, one entry per field you left genuinely blank *for a specific reason* the next step needs in order to ask a sharp follow-up instead of a generic one (e.g. an unresolved date range, or a place name that isn't a recognizable city or airport at all). A named multi-airport city is NOT one of these — that goes in Origin/Destination as the city name, per above, not a blank field with a note. Unlike SoftConstraints, Notes is not permanent: once the new text resolves what a note was about, drop that note — keep only notes still unresolved.
 
 Reply with EXACTLY one JSON object, no prose outside it, no markdown fences — Intention and Info as their own nested objects, each with its own Reasoning:
-{"Intention": {"Type": "new_request"|"additional_info"|"rewrite"|"question_about_result", "Reasoning": "one sentence on why this text reads as that intention"}, "Info": {"Spec": {"Origin": "...", "Destination": "...", "TripType": "one_way"|"round_trip"|"", "MinDepartDate": "...", "MaxDepartDate": "...", "MinReturnDate": "...", "MaxReturnDate": "...", "MinRoundTripDate": "...", "MaxRoundTripDate": "...", "StepDays": 0, "MaxHours": 30, "QueryBudget": 20, "MaxPrice": 0, "MinLayoverMinutes": 120, "MaxLayoverMinutes": 720, "SearchRadiusKm": 100, "SoftConstraints": ["..."], "Notes": ["..."]}, "Reasoning": "one sentence on what you filled in, changed, or left blank and why"}}`
+{"Intention": {"Type": "new_request"|"additional_info"|"rewrite"|"question_about_result", "Reasoning": "one sentence on why this text reads as that intention"}, "Info": {"Spec": {"Origin": "...", "Destination": "...", "TripType": "one_way"|"round_trip"|"", "MinDepartDate": "...", "MaxDepartDate": "...", "MinReturnDate": "...", "MaxReturnDate": "...", "MinRoundTripDate": "...", "MaxRoundTripDate": "...", "StepDays": 0, "MaxHours": 30, "QueryBudget": 20, "MaxPrice": 0, "MinLayoverMinutes": 120, "MaxLayoverMinutes": 720, "CheckedBags": 0, "SearchRadiusKm": 100, "SoftConstraints": ["..."], "Notes": ["..."]}, "Reasoning": "one sentence on what you filled in, changed, or left blank and why"}}`
 
 // FormSpec turns existing (the spec so far — zero value for a new
 // request) plus text (the new email/CLI text to fold in) into an
@@ -149,8 +150,9 @@ const (
 // same "treat zero as omitted, not deliberate" fallback
 // fillDispatchDefaults already applies one step later (at dispatch time),
 // applied here too so a Spec never sits with an unfilled default in the
-// meantime. MaxPrice is deliberately excluded: 0 there is its own
-// documented, legitimate value ("no cap"), never "not filled in."
+// meantime. MaxPrice and CheckedBags are deliberately excluded: 0 is
+// each one's own documented, legitimate value ("no cap," "bags not
+// mentioned"), never "not filled in."
 func normalizeDefaults(s, existing Spec) Spec {
 	if s.MaxHours == 0 {
 		s.MaxHours = existing.MaxHours

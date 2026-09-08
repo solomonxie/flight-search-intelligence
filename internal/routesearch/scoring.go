@@ -20,6 +20,15 @@ func maxPricePtr(maxPrice int) *int {
 	return &maxPrice
 }
 
+// checkedBagsPtr mirrors maxPricePtr: 0 means "not specified," so nothing
+// is sent to Google rather than an explicit "0 checked bags."
+func checkedBagsPtr(checkedBags int) *int {
+	if checkedBags <= 0 {
+		return nil
+	}
+	return &checkedBags
+}
+
 // pickCheapestFeasible returns the cheapest offer whose real (timezone-
 // aware) trip duration fits maxHours, and that duration.
 // maxPriceUSD is the whole-trip price ceiling to enforce here (0 = no

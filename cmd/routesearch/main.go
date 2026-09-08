@@ -48,6 +48,7 @@ func run() error {
 	minLayover := flag.Int("min-layover-minutes", 120, "minimum feasible layover, in minutes")
 	maxLayover := flag.Int("max-layover-minutes", 12*60, "maximum feasible layover, in minutes (raise this + -max-hours for a deliberate multi-day stopover)")
 	pricePerMile := flag.Float64("price-per-mile", 0.08, "fallback $/mile prior used when no cached price exists yet")
+	checkedBags := flag.Int("checked-bags", 0, "whole-trip checked-bag count; 0 = don't tell Google (see DESIGN.md \"Baggage cost is a query input\")")
 	delay := flag.Duration("delay", 3*time.Second, "pacing delay between scrapes (stand-in for Temporal's durable timer)")
 	dbPath := flag.String("db", "data/flight_search.db", "SQLite store path (price cache + audit trail)")
 	openflightsDir := flag.String("openflights-dir", "data/openflights", "cache dir for the OpenFlights airports/routes dataset")
@@ -100,6 +101,7 @@ func run() error {
 		MinLayoverMinutes: *minLayover, MaxLayoverMinutes: *maxLayover,
 		PricePerMile: *pricePerMile, Delay: *delay, ForceRefresh: *forceRefresh,
 		MaxLegs: *maxLegs, MaxCountries: *maxCountries, ExcludedCountries: splitNonEmpty(*excludedCountries),
+		CheckedBags: *checkedBags,
 	}
 
 	// No overall context deadline anywhere below: this is a deliberately

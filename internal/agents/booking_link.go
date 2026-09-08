@@ -44,6 +44,12 @@ func bookingLink(rounds []RoundRecord) string {
 		Destination:   destination,
 		DepartureDate: depart,
 	}
+	// Same bag count the search itself priced with — otherwise the link's
+	// price can disagree with what was just quoted (DESIGN.md "Baggage
+	// cost is a query input").
+	if req.CheckedBags > 0 {
+		params.CheckedBags = &req.CheckedBags
+	}
 	if req.TripType == "round_trip" {
 		ret := req.MinReturnDate
 		if round.Result.ChosenReturnDate != "" {

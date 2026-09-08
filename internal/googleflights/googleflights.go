@@ -108,6 +108,7 @@ type SearchParams struct {
 	Adults        int    // defaults to 1
 	MaxStops      *int   // nil = no restriction; see NonstopOnly
 	MaxPrice      *int   // nil = no cap; USD, whole-trip (see routesearch.Params.MaxPrice)
+	CheckedBags   *int   // nil = don't tell Google, let it default; see routesearch.Params.CheckedBags
 }
 
 // NonstopOnly is the MaxStops value routesearch's own leg-level queries
@@ -135,12 +136,13 @@ func (p SearchParams) toQuery() Query {
 		legs = append(legs, Leg{Date: p.ReturnDate, FromAirport: strings.ToUpper(p.Destination), ToAirport: strings.ToUpper(p.Origin), MaxStops: p.MaxStops})
 	}
 	return Query{
-		Legs:       legs,
-		Seat:       SeatEconomy,
-		Trip:       trip,
-		Passengers: Passengers{Adults: p.Adults},
-		MaxPrice:   p.MaxPrice,
-		Currency:   "USD",
+		Legs:        legs,
+		Seat:        SeatEconomy,
+		Trip:        trip,
+		Passengers:  Passengers{Adults: p.Adults},
+		MaxPrice:    p.MaxPrice,
+		CheckedBags: p.CheckedBags,
+		Currency:    "USD",
 	}
 }
 

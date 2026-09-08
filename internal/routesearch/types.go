@@ -40,6 +40,14 @@ type Params struct {
 	// list's source is the agent loop, not routesearch").
 	MaxCountries      int
 	ExcludedCountries []string
+	// CheckedBags: whole-trip checked-bag count, threaded straight through
+	// to every googleflights query — DESIGN.md "Baggage cost is a query
+	// input, not a scoring adjustment": Offer.Price already comes back
+	// bag-inclusive, so nothing downstream (scoring, Pareto set,
+	// bestConnection) needs to change. 0 = don't tell Google at all
+	// (today's existing behavior), same as MaxPrice's "0 = no cap" — not
+	// "explicitly zero checked bags."
+	CheckedBags int
 }
 
 // Deps are this search's collaborators — a real googleflights client,

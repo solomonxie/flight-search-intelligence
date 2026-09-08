@@ -27,7 +27,7 @@ Never choose "defer" — it exists in the type system but isn't wired to anythin
 
 Judge each round's result against BOTH halves of the spec: concrete fields are already enforced by the search itself (never re-check those — a result violating MaxHours/MaxPrice simply won't appear), but SoftConstraints are plain language only you can judge — e.g. "no self-transfer / separate tickets" is violated by any result with SelfTransfer:true (round-trip results: check OutboundSelfTransfer and ReturnSelfTransfer, either can be true independent of the other). A result violating a soft constraint is NOT "good enough," even if it's the only or cheapest option found: dispatch again with adjusted arguments instead of finalizing, unless you're genuinely out of ideas for how to adjust — then finalize, and say plainly in Reasoning that a soft constraint went unmet.
 
-For "dispatch", "Request" must be a JSON object with these fields (Go field names, exactly): Origin, Destination, TripType ("one_way" or "round_trip" — must already be resolved, never ""), MinDepartDate, MaxDepartDate, MinReturnDate, MaxReturnDate (YYYY-MM-DD; Return* only set when TripType is "round_trip"), MinRoundTripDate, MaxRoundTripDate (YYYY-MM-DD, only if Spec has them — an absolute outer bound, e.g. limited leave), StepDays (int), MaxHours (float), QueryBudget (int), MaxPrice (int USD, 0 = no cap), MinLayoverMinutes, MaxLayoverMinutes (int minutes), SearchRadiusKm (float; only matters when Origin/Destination is a city name, not a specific airport). Copy every one of these straight from the top-level Spec's own same-named field — never invent or narrow a date range yourself, that judgment call already happened in FormSpec; a From/To pair where From < To is a real range to search, not a mistake to collapse.
+For "dispatch", "Request" must be a JSON object with these fields (Go field names, exactly): Origin, Destination, TripType ("one_way" or "round_trip" — must already be resolved, never ""), MinDepartDate, MaxDepartDate, MinReturnDate, MaxReturnDate (YYYY-MM-DD; Return* only set when TripType is "round_trip"), MinRoundTripDate, MaxRoundTripDate (YYYY-MM-DD, only if Spec has them — an absolute outer bound, e.g. limited leave), StepDays (int), MaxHours (float), QueryBudget (int), MaxPrice (int USD, 0 = no cap), MinLayoverMinutes, MaxLayoverMinutes (int minutes), CheckedBags (int, 0 = not mentioned), SearchRadiusKm (float; only matters when Origin/Destination is a city name, not a specific airport). Copy every one of these straight from the top-level Spec's own same-named field — never invent or narrow a date range yourself, that judgment call already happened in FormSpec; a From/To pair where From < To is a real range to search, not a mistake to collapse.
 
 Reply with EXACTLY one JSON object, no prose outside it, no markdown fences:
 {"Action": "dispatch"|"ask_user"|"finalize", "Request": {...only for dispatch...}, "Question": "...only for ask_user...", "Reasoning": "one or two sentences, always present"}`
@@ -262,6 +262,9 @@ func fillDispatchDefaults(req CollectRouteRequest, spec Spec, rounds []RoundReco
 	}
 	if req.MaxLayoverMinutes == 0 {
 		req.MaxLayoverMinutes = fallback.MaxLayoverMinutes
+	}
+	if req.CheckedBags == 0 {
+		req.CheckedBags = fallback.CheckedBags
 	}
 	if req.SearchRadiusKm == 0 {
 		req.SearchRadiusKm = fallback.SearchRadiusKm

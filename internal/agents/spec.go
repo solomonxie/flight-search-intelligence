@@ -23,22 +23,27 @@ type Spec struct {
 	// ranges are independent (see StepDays' doc for the cost tradeoff
 	// that implies), unlike a single fixed trip length.
 	MinDepartDate string
-	MaxDepartDate   string
+	MaxDepartDate string
 	MinReturnDate string
-	MaxReturnDate   string
+	MaxReturnDate string
 	// MinRoundTripDate/MaxRoundTripDate (round_trip only, optional): an outer
 	// eligibility bound both the depart and return date must fall
 	// within, e.g. "I only have a month of paid leave" — narrower than
 	// MinDepartDate/MaxDepartDate and MinReturnDate/MaxReturnDate, which only control what
 	// gets *priced*, not which priced combination is allowed to win.
 	// Blank means no such constraint beyond the ranges themselves.
-	MinRoundTripDate     string
-	MaxRoundTripDate       string
+	MinRoundTripDate  string
+	MaxRoundTripDate  string
 	MaxHours          float64
 	QueryBudget       int
 	MaxPrice          int // USD hard ceiling on the whole trip; 0 = no cap
 	MinLayoverMinutes int
 	MaxLayoverMinutes int
+	// CheckedBags: whole-trip checked-bag count — DESIGN.md "Baggage cost
+	// is a query input, not a scoring adjustment." 0 = not mentioned,
+	// same "0 has a real, legitimate meaning" story as MaxPrice, so it's
+	// never forward-filled with a nonzero default (see normalizeDefaults).
+	CheckedBags int
 	// SearchRadiusKm: how far around a named city's center to look for
 	// alternate airports when Origin/Destination is a city rather than
 	// one specific airport (see dispatch.resolveAirports) — e.g.
@@ -102,6 +107,7 @@ func (s Spec) toCollectRouteRequest() CollectRouteRequest {
 		MinRoundTripDate: s.MinRoundTripDate, MaxRoundTripDate: s.MaxRoundTripDate,
 		MaxHours: s.MaxHours, QueryBudget: s.QueryBudget, MaxPrice: s.MaxPrice,
 		MinLayoverMinutes: s.MinLayoverMinutes, MaxLayoverMinutes: s.MaxLayoverMinutes,
+		CheckedBags:    s.CheckedBags,
 		SearchRadiusKm: s.SearchRadiusKm, StepDays: s.StepDays,
 	}
 }
