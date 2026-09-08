@@ -138,7 +138,13 @@ func orderedRange(from, to string) (string, string) {
 // result as too slow, and it'd leave nothing real for the ask_user
 // question to disclose as "here's what I'll default to."
 const (
-	defaultMaxHours          = 30
+	defaultMaxHours = 30
+	// defaultQueryBudget: routesearch.Params.QueryBudget's own package
+	// default is now unlimited/exhaustive (DESIGN.md "Query budget:
+	// unlimited by default, an optional cap") — this is a deliberate
+	// override for the email/agent path, not "leave it at the default."
+	// See DESIGN.md's "Pacing" section for why an inbound-email pipeline
+	// needs a real cap that a person running the CLI directly doesn't.
 	defaultQueryBudget       = 20
 	defaultMinLayoverMinutes = 120
 	defaultMaxLayoverMinutes = 720

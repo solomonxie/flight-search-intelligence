@@ -13,10 +13,12 @@ package routesearch
 // duration_so_far, legs_so_far), a state discarded the moment another
 // label at the same node dominates it (standard multi-criteria
 // label-setting: Dijkstra's relaxation extended from one scalar cost to
-// a Pareto pair). QUERY_BUDGET stays flat (a deliberate choice, not an
-// oversight — see IMPLEMENTATION_PLAN.md's Phase 3) and is what keeps a
-// high MaxLegs from exploring exhaustively, the same role it already
-// plays at 1 hop.
+// a Pareto pair). Same QueryBudget semantics as the 1-stop case
+// (search.go): <= 0 is unlimited, so a high MaxLegs really does explore
+// exhaustively by default — the frontier's own (*) cutoff and the
+// finite, geometry-/hub-connectivity-pruned graph are what keep it
+// terminating, not an artificial cap. Set QueryBudget explicitly to
+// trade that guarantee for a bounded run instead.
 
 import (
 	"context"
@@ -117,7 +119,7 @@ func searchNHop(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 	settled[p.Origin] = []nhopLabel{origin}
 	frontier := candidateEdges(ctx, deps, p, origin, destination)
 
-	for len(frontier) > 0 && queriesUsed < p.QueryBudget {
+	for len(frontier) > 0 && withinBudget(queriesUsed, p.QueryBudget) {
 		sort.Slice(frontier, func(i, j int) bool { return frontier[i].LB < frontier[j].LB })
 		edge := frontier[0]
 
@@ -185,7 +187,7 @@ func searchNHop(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 		if newLabel.legs() >= p.MaxLegs {
 			continue // hard depth cutoff — this label simply never expands further
 		}
-		if queriesUsed >= p.QueryBudget {
+		if !withinBudget(queriesUsed, p.QueryBudget) {
 			break
 		}
 		frontier = append(frontier, candidateEdges(ctx, deps, p, newLabel, destination)...)

@@ -14,7 +14,9 @@
 package main
 
 import (
+	"bufio"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -29,8 +31,18 @@ import (
 	"flight-search-intelligence/internal/routesearch"
 )
 
+// errCancelled: the user declined the pre-search cost confirmation
+// (confirm.go) — a plain exit, not a failure, so main() reports it
+// without the "routesearch:" error prefix and without a nonzero exit
+// code.
+var errCancelled = errors.New("cancelled")
+
 func main() {
 	if err := run(); err != nil {
+		if errors.Is(err, errCancelled) {
+			fmt.Fprintln(os.Stderr, "Cancelled.")
+			return
+		}
 		fmt.Fprintln(os.Stderr, "routesearch:", err)
 		os.Exit(1)
 	}
@@ -44,7 +56,7 @@ func run() error {
 	date := flag.String("date", "", "departure date, YYYY-MM-DD (required) — the flexible-date window's center, if -date-window-days > 0")
 	returnDate := flag.String("return-date", "", "return date, YYYY-MM-DD — triggers round-trip mode (bundled-fare vs. summed-one-ways comparison)")
 	maxHours := flag.Float64("max-hours", 30, "max tolerable total elapsed trip time, in hours")
-	budget := flag.Int("budget", 20, "max number of hub-search scrapes to spend per direction")
+	budget := flag.Int("budget", 0, "max number of hub-search scrapes to spend per direction; 0 (default) = unlimited, i.e. exhaustive search for the provably best option — set a positive number to trade that guarantee for a faster/cheaper run")
 	minLayover := flag.Int("min-layover-minutes", 120, "minimum feasible layover, in minutes")
 	maxLayover := flag.Int("max-layover-minutes", 12*60, "maximum feasible layover, in minutes (raise this + -max-hours for a deliberate multi-day stopover)")
 	pricePerMile := flag.Float64("price-per-mile", 0.08, "fallback $/mile prior used when no cached price exists yet")
@@ -67,6 +79,7 @@ func run() error {
 	maxLegs := flag.Int("max-legs", 1, "max hops in a split-ticket itinerary; 1 (default) is today's A->hub->B search unchanged, >1 switches to the N-hop label-setting search")
 	maxCountries := flag.Int("max-countries", 0, "cap on distinct countries a candidate path may transit (0 = no cap)")
 	excludedCountries := flag.String("excluded-countries", "", "comma-separated country names (as OpenFlights spells them) a candidate path may never transit")
+	yes := flag.Bool("yes", false, "skip the pre-search cost confirmation prompt (for scripting/automation)")
 	flag.Parse()
 
 	if *origin == "" || *destination == "" || *date == "" {
@@ -118,6 +131,13 @@ func run() error {
 		return nil
 	}
 
+	// Confirmation is skipped entirely once -budget bounds the run (the
+	// user already committed to a fixed effort level) or -yes was passed
+	// (scripting/automation) — it exists to guard the unbounded default,
+	// not every invocation. See confirm.go.
+	skipConfirm := *yes || *budget > 0
+	stdin := bufio.NewReader(os.Stdin)
+
 	switch {
 	case *dateWindowDays > 0:
 		tripLen := *tripLengthDays
@@ -133,6 +153,31 @@ func run() error {
 		if err != nil {
 			return err
 		}
+
+		if !skipConfirm {
+			gridCount := 0
+			for offset := -*dateWindowDays; offset <= *dateWindowDays; offset += *dateStepDays {
+				gridCount++
+			}
+			describe := fmt.Sprintf("%s -> %s, %s +/- %d days", *origin, *destination, *date, *dateWindowDays)
+			candidateHubs, maxQueries := 0, gridCount
+			if !*scanDates {
+				var err error
+				candidateHubs, maxQueries, err = hubEstimate(ctx, deps, base, *returnDate != "")
+				if err != nil {
+					return err
+				}
+				maxQueries += gridCount
+			}
+			ok, err := confirmBeforeSearching(os.Stdout, stdin, describe, candidateHubs, maxQueries, *delay)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return errCancelled
+			}
+		}
+
 		plan, err := routesearch.SearchFlexible(ctx, deps, routesearch.FlexibleParams{
 			Base: base, RoundTrip: *returnDate != "", TripLengthDays: tripLen,
 			WindowDays: *dateWindowDays, StepDays: *dateStepDays, ScanOnly: *scanDates,
@@ -145,6 +190,21 @@ func run() error {
 		printFlexible(plan)
 
 	case *returnDate != "":
+		if !skipConfirm {
+			describe := fmt.Sprintf("%s <-> %s, %s / %s", *origin, *destination, *date, *returnDate)
+			candidateHubs, maxQueries, err := hubEstimate(ctx, deps, base, true)
+			if err != nil {
+				return err
+			}
+			ok, err := confirmBeforeSearching(os.Stdout, stdin, describe, candidateHubs, maxQueries, *delay)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return errCancelled
+			}
+		}
+
 		plan, err := routesearch.SearchRoundTrip(ctx, deps, base, *returnDate)
 		if err != nil {
 			return err
@@ -152,6 +212,32 @@ func run() error {
 		printRoundTrip(plan)
 
 	default:
+		describe := fmt.Sprintf("%s -> %s on %s, max %.0fh", *origin, *destination, *date, *maxHours)
+		if !skipConfirm {
+			if *maxLegs > 1 {
+				msg := fmt.Sprintf("Based on your request (%s, up to %d hops): N-hop search has no fixed candidate-count estimate — real-world runs have used 100+ scrapes from a single well-connected origin, and it's unbounded by default.", describe, *maxLegs)
+				ok, err := confirmFreeform(os.Stdout, stdin, msg)
+				if err != nil {
+					return err
+				}
+				if !ok {
+					return errCancelled
+				}
+			} else {
+				candidateHubs, maxQueries, err := hubEstimate(ctx, deps, base, false)
+				if err != nil {
+					return err
+				}
+				ok, err := confirmBeforeSearching(os.Stdout, stdin, describe, candidateHubs, maxQueries, *delay)
+				if err != nil {
+					return err
+				}
+				if !ok {
+					return errCancelled
+				}
+			}
+		}
+
 		plan, err := routesearch.Search(ctx, deps, base)
 		if err != nil {
 			return err
@@ -160,6 +246,34 @@ func run() error {
 	}
 
 	return nil
+}
+
+// hubEstimate runs the (cheap, scrape-free) candidate-resolution step
+// for base's direction, and for the reverse direction too when
+// bothDirections is set (round trip: outbound and return each get their
+// own independent hub search — DESIGN.md "Hub search runs
+// per-direction, not combined"). Returns the total candidate-hub count
+// (display) and the worst-case scrape count (estimate), including the
+// one bundled round-trip query when bothDirections is set.
+func hubEstimate(ctx context.Context, deps routesearch.Deps, base routesearch.Params, bothDirections bool) (candidateHubs, maxQueries int, err error) {
+	preview, err := routesearch.ResolveCandidates(ctx, deps, base)
+	if err != nil {
+		return 0, 0, err
+	}
+	candidateHubs = preview.CandidatesAfterGeometryPrune
+	maxQueries = maxQueriesForDirection(candidateHubs)
+	if !bothDirections {
+		return candidateHubs, maxQueries, nil
+	}
+	reversed := base
+	reversed.Origin, reversed.Destination = base.Destination, base.Origin
+	retPreview, err := routesearch.ResolveCandidates(ctx, deps, reversed)
+	if err != nil {
+		return 0, 0, err
+	}
+	candidateHubs += retPreview.CandidatesAfterGeometryPrune
+	maxQueries += maxQueriesForDirection(retPreview.CandidatesAfterGeometryPrune) + 1 // +1: the bundled round-trip baseline query
+	return candidateHubs, maxQueries, nil
 }
 
 // splitNonEmpty splits a comma-separated flag value, dropping empty
