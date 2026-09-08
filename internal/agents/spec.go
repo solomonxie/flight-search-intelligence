@@ -11,9 +11,29 @@ type Spec struct {
 	// TripType is "one_way", "round_trip", or "" (not yet known — a
 	// blank ReturnDate alone must never be silently read as "one-way";
 	// see missingRequiredFields, which asks explicitly instead).
-	TripType          string
-	DepartDate        string
-	ReturnDate        string
+	TripType string
+	// DepartDateFrom/DepartDateTo bound when departure may occur —
+	// YYYY-MM-DD, inclusive. An exact, non-flexible date is simply
+	// From == To (e.g. a specific "December 15th" sets both to
+	// "2026-12-15"); a real range (From < To) makes this a flexible
+	// search — routesearch.SearchDateRange prices every date in it and
+	// keeps whichever's cheapest, rather than a single fixed date.
+	// ReturnDateFrom/ReturnDateTo are the same idea for the return leg,
+	// only meaningful when TripType is "round_trip" — depart and return
+	// ranges are independent (see StepDays' doc for the cost tradeoff
+	// that implies), unlike a single fixed trip length.
+	DepartDateFrom string
+	DepartDateTo   string
+	ReturnDateFrom string
+	ReturnDateTo   string
+	// RoundTripFrom/RoundTripTo (round_trip only, optional): an outer
+	// eligibility bound both the depart and return date must fall
+	// within, e.g. "I only have a month of paid leave" — narrower than
+	// DepartDateFrom/To and ReturnDateFrom/To, which only control what
+	// gets *priced*, not which priced combination is allowed to win.
+	// Blank means no such constraint beyond the ranges themselves.
+	RoundTripFrom     string
+	RoundTripTo       string
 	MaxHours          float64
 	QueryBudget       int
 	MaxPrice          int // USD hard ceiling on the whole trip; 0 = no cap
@@ -25,19 +45,12 @@ type Spec struct {
 	// "Vancouver" within the default 100km also considers Abbotsford.
 	// Meaningless when the field already names a specific airport.
 	SearchRadiusKm float64
-	// WindowDays > 0 makes this a flexible-date request (see
-	// routesearch.FlexibleParams, which this reuses the shape of):
-	// DepartDate becomes the search window's *center*, scanned
-	// [-WindowDays, +WindowDays] for whichever date is cheapest, rather
-	// than a single fixed date. 0 (the default) means an exact date —
-	// only set this from an explicit flexibility signal in the text
-	// ("I'm flexible", "any day within a week of the 15th", "sometime
-	// around Christmas, +/- 3 days"), never inferred from a vague date
-	// phrase alone (that's DepartDate/ReturnDate's own job — see
-	// formSpecSystemPromptTemplate).
-	WindowDays int
-	// StepDays samples every StepDays within the window; 0 defaults to
-	// 1 (every day) — only meaningful when WindowDays > 0.
+	// StepDays samples every StepDays within a date range above; 0
+	// defaults to 1 (every day). Only matters when a range is genuinely
+	// flexible (From < To) — a real cost knob: a wide range on both ends
+	// of a round trip prices From-to-To-squared combinations, so
+	// coarser sampling (e.g. every 3 days) can matter a lot more here
+	// than it did for the older single-window case.
 	StepDays        int
 	SoftConstraints []string
 	// Notes carries forward *why* FormSpec left a field blank or unresolved
@@ -52,10 +65,13 @@ type Spec struct {
 // set — what round 1 (no prior round to copy instead) dispatches with.
 func (s Spec) toCollectRouteRequest() CollectRouteRequest {
 	return CollectRouteRequest{
-		Origin: s.Origin, Destination: s.Destination, TripType: s.TripType, DepartDate: s.DepartDate, ReturnDate: s.ReturnDate,
+		Origin: s.Origin, Destination: s.Destination, TripType: s.TripType,
+		DepartDateFrom: s.DepartDateFrom, DepartDateTo: s.DepartDateTo,
+		ReturnDateFrom: s.ReturnDateFrom, ReturnDateTo: s.ReturnDateTo,
+		RoundTripFrom: s.RoundTripFrom, RoundTripTo: s.RoundTripTo,
 		MaxHours: s.MaxHours, QueryBudget: s.QueryBudget, MaxPrice: s.MaxPrice,
 		MinLayoverMinutes: s.MinLayoverMinutes, MaxLayoverMinutes: s.MaxLayoverMinutes,
-		SearchRadiusKm: s.SearchRadiusKm, WindowDays: s.WindowDays, StepDays: s.StepDays,
+		SearchRadiusKm: s.SearchRadiusKm, StepDays: s.StepDays,
 	}
 }
 
