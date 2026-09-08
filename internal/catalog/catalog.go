@@ -132,17 +132,20 @@ func (s *SQLite) CachedPriceCents(ctx context.Context, origin, destination, depa
 }
 
 // CachedOffers returns the most recent flight_offers_cache row for this
-// exact (origin, destination, depart_date, return_date), if one was
-// scraped within maxAge — the cache-first read that lets a search skip a
-// live Google Flights scrape. offersJSON is the raw JSON this search's
-// caller marshaled the offers slice into; ok is false on a miss (nothing
-// cached, or the newest row is older than maxAge).
-func (s *SQLite) CachedOffers(ctx context.Context, origin, destination, departDate, returnDate string, maxAge time.Duration) (offersJSON []byte, createdAt time.Time, ok bool, err error) {
+// exact (origin, destination, depart_date, return_date, checked_bags), if
+// one was scraped within maxAge — the cache-first read that lets a search
+// skip a live Google Flights scrape. checkedBags is part of the key
+// because it changes Offer.Price (see DESIGN.md "Baggage cost is a query
+// input") — a bags=2 search must never be served a bags=0 scrape's
+// prices, or vice versa. offersJSON is the raw JSON this search's caller
+// marshaled the offers slice into; ok is false on a miss (nothing cached,
+// or the newest row is older than maxAge).
+func (s *SQLite) CachedOffers(ctx context.Context, origin, destination, departDate, returnDate string, checkedBags int, maxAge time.Duration) (offersJSON []byte, createdAt time.Time, ok bool, err error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT offers_json, created_at FROM flight_offers_cache
-		WHERE origin = ? AND destination = ? AND depart_date = ? AND return_date = ?
+		WHERE origin = ? AND destination = ? AND depart_date = ? AND return_date = ? AND checked_bags = ?
 		ORDER BY created_at DESC LIMIT 1`,
-		origin, destination, departDate, returnDate)
+		origin, destination, departDate, returnDate, checkedBags)
 
 	var json, createdAtStr string
 	if err := row.Scan(&json, &createdAtStr); err != nil {
@@ -162,14 +165,15 @@ func (s *SQLite) CachedOffers(ctx context.Context, origin, destination, departDa
 }
 
 // SaveOffersCache records one live scrape's raw offers for future
-// CachedOffers reads. offersJSON is the caller's own JSON encoding of
-// the offers slice — this package doesn't depend on googleflights, so it
+// CachedOffers reads, keyed on checkedBags alongside route/date (see
+// CachedOffers). offersJSON is the caller's own JSON encoding of the
+// offers slice — this package doesn't depend on googleflights, so it
 // stores the bytes opaquely rather than the typed offers.
-func (s *SQLite) SaveOffersCache(ctx context.Context, origin, destination, departDate, returnDate, source string, offersJSON []byte, createdAt time.Time) error {
+func (s *SQLite) SaveOffersCache(ctx context.Context, origin, destination, departDate, returnDate string, checkedBags int, source string, offersJSON []byte, createdAt time.Time) error {
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO flight_offers_cache (origin, destination, depart_date, return_date, source, offers_json, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		origin, destination, departDate, returnDate, source, string(offersJSON), createdAt.UTC().Format(time.RFC3339))
+		INSERT INTO flight_offers_cache (origin, destination, depart_date, return_date, checked_bags, source, offers_json, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		origin, destination, departDate, returnDate, checkedBags, source, string(offersJSON), createdAt.UTC().Format(time.RFC3339))
 	if err != nil {
 		return fmt.Errorf("catalog: saving offers cache: %w", err)
 	}

@@ -179,26 +179,58 @@ Depends on Phase 0.
       multi-leg result cheaper than the baseline, respects `MaxLegs` and
       `QueryBudget`, and never revisits an airport within one itinerary
 
-## Phase 4: Baggage and other per-request search filters
+## Phase 4: Baggage and other per-request search filters — done
 
 DESIGN.md "Baggage cost is a query input, not a scoring adjustment"
-(designed: `3d0cb65`, not yet built). Pure plumbing — no scoring-logic
-changes anywhere in this phase. Independent of Phase 3; both extend
-Phase 0's `Params` surface.
+(designed: `3d0cb65`). Pure plumbing — no scoring-logic changes anywhere
+in this phase. Independent of Phase 3; both extend Phase 0's `Params`
+surface.
 
-- [ ] `googleflights.SearchParams`: add `CheckedBags *int` (and
-      `CarryOnBags *int` if needed), thread into `toQuery()` →
-      `Query.CheckedBags`/`CarryOnBags` (already wired to the protobuf,
-      `protobuf.go:126-127`)
-- [ ] `routesearch.Params`: add `CheckedBags int`, pass through on every
-      `searchOffers` call in `search.go` (baseline, leg1, leg2) and
-      `roundtrip.go`/`flexible.go`
-- [ ] `agents.Spec`: add `CheckedBags int`, thread into
-      `CollectRouteRequest` in `decide.go`
-- [ ] `cmd/routesearch`: add a `-checked-bags` flag
-- [ ] Verify live: same route/date with `CheckedBags` 0 vs. 2 on a
-      budget-carrier itinerary, confirm `Offer.Price` actually rises —
-      don't just trust the field exists
+- [x] `googleflights.SearchParams`: add `CheckedBags *int`, thread into
+      `toQuery()` → `Query.CheckedBags` (already wired to the protobuf,
+      `protobuf.go:126-127`) — `CarryOnBags` stayed unneeded, nothing
+      asked for it
+- [x] `routesearch.Params`: add `CheckedBags int` (`checkedBagsPtr`
+      mirrors `maxPricePtr`'s "0 = not specified" convention), pass
+      through on every `searchOffers` call in `search.go` (baseline,
+      leg1, leg2), `roundtrip.go`'s bundled query, and `flexible.go`'s
+      `scanPair` — also threaded into `nhop.go`'s two `searchOffers`
+      calls, not explicitly named above but the same gap under N-hop
+      search (Phase 3)
+- [x] `agents.Spec`: add `CheckedBags int`, thread into
+      `CollectRouteRequest` (`toCollectRouteRequest`, `task.go`,
+      `fillDispatchDefaults` in `decide.go`) and both LLM prompts
+      (`decideSystemPrompt`'s dispatch-argument contract,
+      `formSpecSystemPromptTemplate`'s field list) so free text like "2
+      checked bags" actually reaches a dispatched search, not just a
+      CLI flag. Excluded from `normalizeDefaults`, same as `MaxPrice`: 0
+      is CheckedBags' own legitimate value ("not mentioned"), never "not
+      filled in yet"
+- [x] `cmd/routesearch`: `-checked-bags` flag
+- [x] `agents.bookingLink`: also carries the dispatched request's
+      `CheckedBags` — found while wiring this phase, not in the original
+      checklist: the booking link a traveler clicks priced the same
+      itinerary Google returned, so a link that dropped the bag count
+      could show a different (lower) price than what was just quoted
+- [x] **Found while verifying live, fixed as part of this phase, not in
+      the original checklist:** `flight_offers_cache`'s lookup key was
+      (origin, destination, depart_date, return_date) only —
+      `CheckedBags` didn't participate, so a `CheckedBags:2` search made
+      within `offersCacheFreshness` (24h) of an existing `CheckedBags:0`
+      scrape for the same route/date would silently reuse the wrong
+      (bag-mismatched) prices. Flyway `V009` adds a `checked_bags` column
+      (default 0, backward-compatible with existing rows) and folds it
+      into the lookup index; `catalog.CachedOffers`/`SaveOffersCache`
+      take it as a parameter now
+- [x] Verify live: DEN→LAS 2026-10-15, `-checked-bags 0` vs. `2`,
+      `-max-hours 5` (forces the nonstop over the cheaper-but-11h
+      self-transfer, whose fare Google doesn't reprice for bags on this
+      carrier — DESIGN.md's noted Google-side limitation, not a bug
+      here): `$117` → `$145`, confirmed against real scraped
+      `Offer.Price`, not just that the field exists. Also confirmed the
+      wire-level encoding differs (`SearchURL` embeds a distinct `tfs`
+      payload per bag count) and that a full `Search()` run picks up the
+      new cache key correctly
 
 ## Phase 5: Infra — provisioning the agent-loop stack for production
 
@@ -233,3 +265,31 @@ nothing dependency-ordered to schedule until one exists.
 - [ ] Seat/cabin filters (legroom, seat class) as additional query
       inputs — same "query input, not a scoring adjustment" shape as
       Phase 4's baggage, but no DESIGN.md write-up exists yet
+- [ ] Fixed-length trip, wide-open window as its own agent-loop request
+      shape — e.g. "a month-long trip, anytime in the next year, under
+      $1000" (raised in discussion, not started). `SearchDateRange`
+      (Phase 2) is the only flexible-date path wired into `agents.Spec`/
+      `CollectRouteRequest` today, and it prices independent depart x
+      return ranges — window², so a year-wide window on both ends is
+      hundreds of thousands of combinations, nowhere near
+      `QueryBudget`-feasible; it'd truncate hard and likely miss the
+      real cheapest window rather than search it properly.
+      `FlexibleParams`'s coupled case (`SearchFlexible`, already built —
+      Phase 0/pre-Phase-2 — center date + `WindowDays` + fixed
+      `TripLengthDays`, sampled every `StepDays`) is the right shape for
+      "trip length is fixed, window is wide": only `WindowDays/StepDays`
+      queries, not squared. It's exposed today only via `cmd/routesearch`
+      CLI flags (`-date-window-days`, `-trip-length-days`), never reached
+      from `agents.Spec`/`CollectRouteRequest`/`dispatch.runSearch` — so
+      the agent loop has no way to choose it over `SearchDateRange` even
+      when the request is exactly this shape. Needs a DESIGN.md decision
+      on: how `FormSpec` tells "fixed length, wide window" apart from
+      "independently flexible on both ends" from free text (a new
+      `TripLengthDays` field on `Spec`? inferred from `MinReturnDate ==
+      ""` alongside a wide `MaxDepartDate` window?), and how
+      `dispatch.runSearch` picks `SearchFlexible` vs. `SearchDateRange`
+      once that signal exists. Booking real leave for whatever
+      date range wins is the traveler's own follow-up action, not
+      something this system does — but the final reply already states
+      the chosen dates precisely (`ChosenDepartDate`/`ChosenReturnDate`),
+      which is what a request like that actually needs from it.

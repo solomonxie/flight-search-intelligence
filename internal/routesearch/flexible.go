@@ -173,7 +173,8 @@ func scanOneDate(ctx context.Context, deps Deps, p FlexibleParams, center time.T
 func scanPair(ctx context.Context, deps Deps, base Params, depart, ret string) (DateScanEntry, bool) {
 	entry := DateScanEntry{DepartDate: depart, ReturnDate: ret}
 	params := googleflights.SearchParams{
-		Origin: base.Origin, Destination: base.Destination, DepartureDate: depart, MaxPrice: maxPricePtr(base.MaxPrice),
+		Origin: base.Origin, Destination: base.Destination, DepartureDate: depart,
+		MaxPrice: maxPricePtr(base.MaxPrice), CheckedBags: checkedBagsPtr(base.CheckedBags),
 	}
 	if ret != "" {
 		params.ReturnDate = ret

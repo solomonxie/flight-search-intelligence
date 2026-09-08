@@ -116,6 +116,7 @@ func runSearch(ctx context.Context, deps routesearch.Deps, req agents.CollectRou
 				MaxPrice:          req.MaxPrice,
 				MinLayoverMinutes: req.MinLayoverMinutes,
 				MaxLayoverMinutes: req.MaxLayoverMinutes,
+				CheckedBags:       req.CheckedBags,
 				PricePerMile:      0.08,
 			})
 			if err != nil {
@@ -165,6 +166,7 @@ func runRoundTripSearch(ctx context.Context, deps routesearch.Deps, req agents.C
 				MaxPrice:          req.MaxPrice,
 				MinLayoverMinutes: req.MinLayoverMinutes,
 				MaxLayoverMinutes: req.MaxLayoverMinutes,
+				CheckedBags:       req.CheckedBags,
 				PricePerMile:      0.08,
 			}, req.MinReturnDate)
 			if err != nil {
@@ -221,6 +223,7 @@ func runDateRangeSearch(ctx context.Context, deps routesearch.Deps, req agents.C
 					MaxPrice:          req.MaxPrice,
 					MinLayoverMinutes: req.MinLayoverMinutes,
 					MaxLayoverMinutes: req.MaxLayoverMinutes,
+					CheckedBags:       req.CheckedBags,
 					PricePerMile:      0.08,
 				},
 				RoundTrip:      roundTrip,
