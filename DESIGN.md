@@ -1300,6 +1300,96 @@ doc — say so if you'd rather change them):
   in local dev) until request volume actually justifies a Loki/ELK-style
   aggregator. Say so if you want one now instead of deferred.
 
+### Wide fuzzy-range search, preference-aware pruning, a trace file, and a shared rate limiter
+
+Extends "Round trips and flexible dates," "Deeper itineraries" (hop-
+country constraints), and this section's own audit-trail/pacing above —
+raised in discussion once a real request looked like "cheapest trip,
+sometime in the next N months/years, roughly M days long (give or take),
+avoid country X as a layover, not around a given holiday." Generalizes
+IMPLEMENTATION_PLAN.md's former "Fixed-length trip, wide-open window"
+backlog item rather than building it exactly as first scoped — the
+original framing was one example (a specific window/length), not the
+actual requirement (*any* width, on *any* of these dimensions).
+
+**Resolved: every fuzzy dimension is enumerated exhaustively by default,
+at any width — cost made visible, never silently narrowed.**
+`FlexibleParams.TripLengthDays` (a single fixed length) becomes a
+tolerance range (`TripLengthDays`..`TripLengthMaxDays`, sampled every
+`TripLengthStepDays`, defaulting to 1 = every day — same convention every
+other `StepDays` field in this codebase already uses); `FlexibleParams`
+also gains an explicit `DepartFrom`/`DepartTo` window as an alternative
+to today's center-date-plus-`WindowDays` shape. No dimension gets a
+forced coarse default the way an earlier draft of this plan proposed
+(erroring unless the caller picked a step) — that would trade away the
+"true global optimum" guarantee the hub search already gives for hops,
+for a heuristic approximation, which is the wrong tradeoff here. Instead:
+before spending a real scrape, the true combination count and time
+estimate is shown (`cmd/routesearch/confirm.go`'s existing pre-flight
+pattern, extended to this shape; the agent/email path's own "disclose
+default assumptions on the first `ask_user` round" mechanism, extended to
+disclose this too), and `QueryBudget` (unlimited by default) is the one
+explicit opt-in cap. Coarser sampling stays available, but only as an
+explicit request ("check every few days"), never a silent default.
+
+**Considered: a Google Flights bulk price-calendar/graph endpoint**,
+analogous to what `internal/googleflights/protobuf.go` already reverse-
+engineered for the single-date search — the only way to make a very wide
+window's exhaustive search fast too, since (unlike hop distance) there's
+no admissible price lower-bound for an unqueried date to prune on. Not
+committed: a time-boxed spike, not yet known whether such an endpoint is
+reachable the same way. Falls back to today's one-scrape-per-date `scanPair`
+loop if not found; the finding either way gets recorded here once done, so
+it's not re-investigated blind later.
+
+**Resolved: hop-country and blackout-date pruning reach the agent loop,
+not just `cmd/routesearch`.** `routesearch.Params.ExcludedCountries`/
+`MaxCountries` and `FlexibleParams`/`DateRangeParams`' `BlackoutDates`
+already exist and are already enforced by the search itself — but
+`agents.Spec`/`CollectRouteRequest` never carried them, so a plain-English
+"avoid Russia as a layover" or "not around Christmas" had no path into
+either mechanism, in any search shape. `Spec` gains matching fields;
+`FormSpec`'s prompt learns when to set them; `dispatch.runSearch` threads
+them into every `routesearch.Params`/`DateRangeParams`/`FlexibleParams`
+literal it builds, not just the new fuzzy-range shape. General
+preferences ("I prefer an aisle seat," "I'd rather fly Star Alliance")
+stay on `Spec.SoftConstraints`, already judged per-result by
+`DecideNextAction` — no new mechanism needed there.
+
+**Resolved: one combined trace file per request, not just a
+`route_search_plans` row.** The per-candidate audit trail this section
+already documents above (`plan_json`'s per-hub/hop/date table, `outcome`
++ `reason` on every entry) stays exactly as-is and exactly as valuable —
+this adds a plain-file export of the *same* data, joined with the
+conversation-level trail (`agents.Outcome`/`RoundRecord`: each round's
+`Spec` snapshot, `Decision`+`Reasoning`, and `Result`) that today only
+exists in memory during one loop run. One JSON file per finalized
+request: every round, what was decided and why, and — nested under each
+round — every route/date/hop combination that round's search actually
+tried and whether it was kept or rejected and why. Mechanically this is
+almost entirely wiring, not new tracking: the data was already fully
+modeled, just never joined or written past the database.
+
+**Resolved: a shared, process-wide rate limiter underneath the existing
+per-request spacing, not a replacement for it.** "Query spacing," above,
+already resolves *how far apart one request's own scrapes* are spaced
+(`Params.Delay`/`sleepPacing`) — what it doesn't cover is `cmd/collector
+-worker`'s worker pool (`concurrency` goroutines, each running a
+*different* request's search independently): every goroutine paces
+*itself* with no shared state, so real scrape throughput scales with
+`concurrency`, not with `Delay` — the exact shape "Collector task
+dispatch"'s live-run note about tripping Google's rate limiting from
+near-simultaneous scrapes already describes. `internal/ratelimit.Limiter`
+(`Wait(ctx) error`) is the fix: a `FixedWindow` implementation combining
+multiple granularities (second/minute/hour/day, each independently
+capped) behind one mutex-guarded counter set, shared by every
+`googleflights.Client` in a process — wired at the client's one real HTTP
+call site, so it throttles every concurrent goroutine together rather
+than each independently. No token-bucket/leaky-bucket implementation for
+now; the `Limiter` interface leaves room for one, and for a Redis-backed
+implementation of the same interface once this goes distributed across
+the Phase 5 Kubernetes fleet, without touching any call site again.
+
 ## Open decisions
 
 **Resolved:** cloud = AWS EC2, self-managed compute; IaC = Terraform

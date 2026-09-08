@@ -254,6 +254,66 @@ deploying continuously until Phases 1-4 give the loop real judgment.
 - [ ] Strimzi Kafka and Postgres as self-managed workloads on the same
       cluster
 
+## Phase 6: Wide fuzzy-range search, preference-aware pruning, trace files, a shared rate limiter
+
+DESIGN.md "Wide fuzzy-range search, preference-aware pruning, a trace
+file, and a shared rate limiter" — supersedes the old "Fixed-length
+trip, wide-open window" backlog item below with the actual requirement
+(any width, on any fuzzy dimension), not one example of it. Depends on
+Phase 2 (`Spec`/`FormSpec`/`dispatch.runSearch`) and Phase 3
+(`ExcludedCountries`/`MaxCountries`); independent of Phase 5.
+
+- [ ] `routesearch.FlexibleParams`: `TripLengthDays` becomes a tolerance
+      range (`TripLengthMaxDays`, `TripLengthStepDays` — 0 defaults to
+      1, every day, never an error); add explicit `DepartFrom`/`DepartTo`
+      as an alternative to center date + `WindowDays`
+- [ ] Fix: `SearchFlexible`'s Phase A has no `QueryBudget` check at all
+      today (unlike `SearchDateRange`) — add the same
+      `withinBudget`/`queriesUsed` guard
+- [ ] `routesearch.DateRangeParams`: add `BlackoutDates`, threaded into
+      its `eligibility{...}` the same way `FlexibleParams` already does
+- [ ] Pre-flight cost estimate for the new shapes: extend
+      `cmd/routesearch/confirm.go`'s pattern; extend `DecideNextAction`'s
+      existing "disclose default assumptions on first `ask_user`" to also
+      disclose a wide fuzzy range's estimated query count/time
+- [ ] Time-boxed spike: a Google Flights bulk price-calendar/graph
+      endpoint (same reverse-engineering approach as
+      `internal/googleflights/protobuf.go`) — record the finding in
+      DESIGN.md either way; wire in as Phase A's preferred path over
+      per-date `scanPair` only if found workable
+- [ ] `agents.Spec`/`CollectRouteRequest`: add `MinTripLengthDays`/
+      `MaxTripLengthDays`/`TripLengthStepDays`, `ExcludedCountries`,
+      `MaxCountries`, `BlackoutDates`; forward in
+      `Spec.toCollectRouteRequest`
+- [ ] `FormSpec`'s prompt: teach all six new fields, incl. trip-length
+      tolerance as an alternative to `MinReturnDate`/`MaxReturnDate`
+      (mutually exclusive — `validateDates` resolves a contradiction the
+      same way it already resolves a backwards return window)
+- [ ] `decide.go`: round-trip's required-field check accepts a trip-length
+      range as an alternative to `MinReturnDate`; add new fields to
+      `decideSystemPrompt`'s dispatch-argument contract and
+      `fillDispatchDefaults`
+- [ ] `dispatch.runSearch`: new `tripLengthFlex` branch →
+      `runFlexibleTripLengthSearch` (factor the origin/destination
+      candidate-merge loop `runDateRangeSearch` already has into one
+      shared helper); thread `ExcludedCountries`/`MaxCountries`/
+      `BlackoutDates` into every `Params`/`DateRangeParams`/
+      `FlexibleParams` literal in the file, not just the new shape
+- [ ] `catalog.GetRouteSearchPlan` (read-side counterpart to
+      `SaveRouteSearchPlan`); a `WriteTraceFile` helper (mirrors
+      `cmd/collector/main.go`'s `writeRaw` idiom); every routesearch
+      entry point writes its `Plan`/`FlexiblePlan` to a trace file
+      alongside the existing DB save; the agent loop's finalize step
+      writes one combined file joining `agents.Outcome`'s conversation
+      trail with each round's fetched `RouteSearchPlan`
+- [ ] `internal/ratelimit`: `Limiter` interface + `FixedWindow`
+      (multi-granularity, mutex-guarded) implementation; wire into
+      `googleflights.Client`'s one HTTP call site, one shared instance
+      per process across all four `NewClient()` call sites
+- [ ] Tests: `flexible_test.go` (new), `daterange_test.go` extension,
+      `dispatch/search_test.go` new cases, `formspec_test.go` extension,
+      a trace-file test, `ratelimit_test.go` (incl. `-race`)
+
 ## Backlog — proposed, not yet a DESIGN.md decision
 
 Not a phase: no DESIGN.md section has decided these yet, so there's
@@ -265,31 +325,6 @@ nothing dependency-ordered to schedule until one exists.
 - [ ] Seat/cabin filters (legroom, seat class) as additional query
       inputs — same "query input, not a scoring adjustment" shape as
       Phase 4's baggage, but no DESIGN.md write-up exists yet
-- [ ] Fixed-length trip, wide-open window as its own agent-loop request
-      shape — e.g. "a month-long trip, anytime in the next year, under
-      $1000" (raised in discussion, not started). `SearchDateRange`
-      (Phase 2) is the only flexible-date path wired into `agents.Spec`/
-      `CollectRouteRequest` today, and it prices independent depart x
-      return ranges — window², so a year-wide window on both ends is
-      hundreds of thousands of combinations, nowhere near
-      `QueryBudget`-feasible; it'd truncate hard and likely miss the
-      real cheapest window rather than search it properly.
-      `FlexibleParams`'s coupled case (`SearchFlexible`, already built —
-      Phase 0/pre-Phase-2 — center date + `WindowDays` + fixed
-      `TripLengthDays`, sampled every `StepDays`) is the right shape for
-      "trip length is fixed, window is wide": only `WindowDays/StepDays`
-      queries, not squared. It's exposed today only via `cmd/routesearch`
-      CLI flags (`-date-window-days`, `-trip-length-days`), never reached
-      from `agents.Spec`/`CollectRouteRequest`/`dispatch.runSearch` — so
-      the agent loop has no way to choose it over `SearchDateRange` even
-      when the request is exactly this shape. Needs a DESIGN.md decision
-      on: how `FormSpec` tells "fixed length, wide window" apart from
-      "independently flexible on both ends" from free text (a new
-      `TripLengthDays` field on `Spec`? inferred from `MinReturnDate ==
-      ""` alongside a wide `MaxDepartDate` window?), and how
-      `dispatch.runSearch` picks `SearchFlexible` vs. `SearchDateRange`
-      once that signal exists. Booking real leave for whatever
-      date range wins is the traveler's own follow-up action, not
-      something this system does — but the final reply already states
-      the chosen dates precisely (`ChosenDepartDate`/`ChosenReturnDate`),
-      which is what a request like that actually needs from it.
+- Fixed-length trip, wide-open window as its own agent-loop request
+  shape — superseded by Phase 6 above (generalized to any width, on any
+  fuzzy dimension, not just this one example), not a backlog item anymore
