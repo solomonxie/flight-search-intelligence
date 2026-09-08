@@ -82,10 +82,11 @@ func SearchFlexible(ctx context.Context, deps Deps, p FlexibleParams) (*Flexible
 		step = 1
 	}
 
+	elig := eligibility{AvailableFrom: p.AvailableFrom, AvailableUntil: p.AvailableUntil, ExcludeWeekdays: p.ExcludeWeekdays, BlackoutDates: p.BlackoutDates}
 	log.Info("phase A: date scan", "window_days", p.WindowDays, "step_days", step, "round_trip", p.RoundTrip)
 	for offset := -p.WindowDays; offset <= p.WindowDays; offset += step {
 		entry, live := scanOneDate(ctx, deps, p, center, offset)
-		entry.Excluded = exclusionReason(p, entry)
+		entry.Excluded = exclusionReason(elig, entry)
 		plan.DateScan = append(plan.DateScan, entry)
 		log.Info("date scan point", "depart", entry.DepartDate, "return", entry.ReturnDate,
 			"price_usd", entry.PriceUSD, "reason", entry.Reason, "live", live)
@@ -149,24 +150,43 @@ func SearchFlexible(ctx context.Context, deps Deps, p FlexibleParams) (*Flexible
 	return plan, nil
 }
 
-// scanOneDate is one Phase-A query: cheapest-by-price only, no hub
-// search — the whole point of this phase is staying cheap per date so a
-// wide window is affordable.
+// scanOneDate is one Phase-A query for the coupled (fixed trip length,
+// flexible start) case: cheapest-by-price only, no hub search — the
+// whole point of this phase is staying cheap per date so a wide window
+// is affordable. Thin wrapper around scanPair, which SearchDateRange
+// (daterange.go) also uses for the independent-ranges case.
 func scanOneDate(ctx context.Context, deps Deps, p FlexibleParams, center time.Time, offsetDays int) (DateScanEntry, bool) {
 	depart := center.AddDate(0, 0, offsetDays).Format("2006-01-02")
-	entry := DateScanEntry{DepartDate: depart}
+	if !p.RoundTrip {
+		return scanPair(ctx, deps, p.Base, depart, "")
+	}
+	ret := center.AddDate(0, 0, offsetDays+p.TripLengthDays).Format("2006-01-02")
+	return scanPair(ctx, deps, p.Base, depart, ret)
+}
 
-	if p.RoundTrip {
-		ret := center.AddDate(0, 0, offsetDays+p.TripLengthDays).Format("2006-01-02")
-		entry.ReturnDate = ret
-		offers, live, err := deps.searchOffers(ctx, googleflights.SearchParams{
-			Origin: p.Base.Origin, Destination: p.Base.Destination, DepartureDate: depart, ReturnDate: ret, MaxPrice: maxPricePtr(p.Base.MaxPrice),
-		}, p.Base.ForceRefresh)
-		entry.Queried = true
-		if err != nil {
-			entry.Reason = err.Error()
-			return entry, live
-		}
+// scanPair is the low-level Phase-A query for one (depart[, return])
+// combination: cheapest-by-price only, no hub search. ret == "" means
+// one-way. Shared by scanOneDate (a fixed offset from a center date)
+// and SearchDateRange's grid (every depart x return combination in two
+// independent ranges) — both are just different ways of enumerating
+// which pairs to try; the query itself doesn't care which.
+func scanPair(ctx context.Context, deps Deps, base Params, depart, ret string) (DateScanEntry, bool) {
+	entry := DateScanEntry{DepartDate: depart, ReturnDate: ret}
+	params := googleflights.SearchParams{
+		Origin: base.Origin, Destination: base.Destination, DepartureDate: depart, MaxPrice: maxPricePtr(base.MaxPrice),
+	}
+	if ret != "" {
+		params.ReturnDate = ret
+	}
+	offers, live, err := deps.searchOffers(ctx, params, base.ForceRefresh)
+	entry.Queried = true
+	if err != nil {
+		entry.Reason = err.Error()
+		return entry, live
+	}
+	if ret != "" {
+		// Whole-trip bundled price — no duration/feasibility filter, same
+		// as SearchRoundTrip's own bundled comparison (price alone decides).
 		if offer, ok := cheapestOffer(offers); ok {
 			entry.PriceUSD = float64(offer.Price)
 		} else {
@@ -174,16 +194,7 @@ func scanOneDate(ctx context.Context, deps Deps, p FlexibleParams, center time.T
 		}
 		return entry, live
 	}
-
-	offers, live, err := deps.searchOffers(ctx, googleflights.SearchParams{
-		Origin: p.Base.Origin, Destination: p.Base.Destination, DepartureDate: depart, MaxPrice: maxPricePtr(p.Base.MaxPrice),
-	}, p.Base.ForceRefresh)
-	entry.Queried = true
-	if err != nil {
-		entry.Reason = err.Error()
-		return entry, live
-	}
-	if offer, _, ok := pickCheapestFeasible(offers, deps.Graph, p.Base.MaxHours, float64(p.Base.MaxPrice)); ok {
+	if offer, _, ok := pickCheapestFeasible(offers, deps.Graph, base.MaxHours, float64(base.MaxPrice)); ok {
 		entry.PriceUSD = float64(offer.Price)
 	} else {
 		entry.Reason = "no feasible offer"
@@ -191,31 +202,43 @@ func scanOneDate(ctx context.Context, deps Deps, p FlexibleParams, center time.T
 	return entry, live
 }
 
+// eligibility is the "real-world window narrower than what gets priced"
+// constraint both FlexibleParams (coupled window+length) and
+// DateRangeParams (independent ranges) support — e.g. limited PTO.
+// Every scanned combination is still priced and shown either way; this
+// only narrows which of them cheapestDateScanEntry may pick as the
+// winner. Factored out of FlexibleParams so both share one check.
+type eligibility struct {
+	AvailableFrom, AvailableUntil string
+	ExcludeWeekdays               []time.Weekday
+	BlackoutDates                 []string
+}
+
 // exclusionReason reports why entry, if priced, may not be picked as the
 // Phase A winner — empty if it's fully eligible. Checked independently of
 // PriceUSD/Reason so an excluded date still shows its price for context
 // (e.g. "yes it's $50 cheaper, but it's a blackout date").
-func exclusionReason(p FlexibleParams, entry DateScanEntry) string {
-	if p.AvailableFrom != "" {
-		if entry.DepartDate < p.AvailableFrom || (entry.ReturnDate != "" && entry.ReturnDate < p.AvailableFrom) {
-			return "before AvailableFrom " + p.AvailableFrom
+func exclusionReason(e eligibility, entry DateScanEntry) string {
+	if e.AvailableFrom != "" {
+		if entry.DepartDate < e.AvailableFrom || (entry.ReturnDate != "" && entry.ReturnDate < e.AvailableFrom) {
+			return "before AvailableFrom " + e.AvailableFrom
 		}
 	}
-	if p.AvailableUntil != "" {
-		if entry.DepartDate > p.AvailableUntil || (entry.ReturnDate != "" && entry.ReturnDate > p.AvailableUntil) {
-			return "after AvailableUntil " + p.AvailableUntil
+	if e.AvailableUntil != "" {
+		if entry.DepartDate > e.AvailableUntil || (entry.ReturnDate != "" && entry.ReturnDate > e.AvailableUntil) {
+			return "after AvailableUntil " + e.AvailableUntil
 		}
 	}
-	if len(p.ExcludeWeekdays) > 0 {
+	if len(e.ExcludeWeekdays) > 0 {
 		if depart, err := time.Parse("2006-01-02", entry.DepartDate); err == nil {
-			for _, wd := range p.ExcludeWeekdays {
+			for _, wd := range e.ExcludeWeekdays {
 				if depart.Weekday() == wd {
 					return "excluded weekday " + wd.String()
 				}
 			}
 		}
 	}
-	for _, b := range p.BlackoutDates {
+	for _, b := range e.BlackoutDates {
 		if entry.DepartDate == b || (entry.ReturnDate != "" && entry.ReturnDate == b) {
 			return "blackout date " + b
 		}
