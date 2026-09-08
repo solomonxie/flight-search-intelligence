@@ -13,8 +13,26 @@ on their own. Eventually: email in a request in plain language —
 nothing too long" — and get real options back, with room to add more
 context while it's still searching.
 
+## Why this beats a plain flight search
+
+Google Flights answers one query. This runs a real search algorithm —
+best-first branch-and-bound with admissible pruning (the same family as
+A* and Dijkstra) over a graph of routes it discovers by scraping as it
+goes — and, by default, runs it to exhaustion: every candidate connection
+worth considering gets tried, not just the first few that look
+promising. It stops only once the math proves nothing left in the
+search space can beat the best price found so far, not when a clock or
+an arbitrary scrape cap says to. Slower than one query, on purpose — the
+tradeoff this project is built around is time for a provably best
+answer instead of a fast, plausibly-good one. (A `-budget` flag exists
+to cap it for a quicker, cheaper run when you'd rather trade the
+guarantee away — see "Try it now" below.)
+
 ## Features
 
+- **Exhaustive by default, not just fast** — unlimited query budget: the
+  search runs until it can prove no unexplored option beats the best one
+  found, the actual selling point over a plain search (see above).
 - **Real fares, no paid API** — pulled live, directly from Google
   Flights.
 - **Finds routes a plain search misses** — splitting a trip across two
@@ -62,5 +80,12 @@ Add a return date for the round-trip comparison, and/or
 go run ./cmd/routesearch -origin YVR -destination PEK \
   -date 2026-12-22 -return-date 2027-01-05 -date-window-days 15
 ```
+
+Before it spends a single real scrape, it estimates how many candidate
+routes/queries the search could take and asks you to confirm — the
+default is unlimited/exhaustive (see "Why this beats a plain flight
+search" above), so this is your chance to see the worst case first.
+`-budget N` caps it at N scrapes instead (trading the provably-best
+guarantee for a bounded run); `-yes` skips the prompt entirely.
 
 See `DESIGN.md` for how it works under the hood and what's still ahead.

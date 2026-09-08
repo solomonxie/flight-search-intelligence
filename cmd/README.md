@@ -64,11 +64,18 @@ incoming email would trigger one action, not a persistent process.
 Run the full money-saving flight search once, right now, from your
 terminal — ask a question, get an answer, done. No database polling, no
 background worker involved. This is the easiest way to try the search
-yourself today (see the root `README.md`'s "Try it now").
+yourself today (see the root `README.md`'s "Try it now"). Exhaustive by
+default (no query cap — see root `README.md` "Why this beats a plain
+flight search"), so before it spends a single real scrape it estimates
+how many it might take and asks you to confirm; `-yes` skips that
+prompt, `-budget N` caps the run instead of running exhaustively.
 
 - **`main.go`** — reads your command-line options, runs the right kind
   of search (plain one-way, round trip, or flexible dates), and prints a
   readable summary of what it found.
+- **`confirm.go`** — the pre-search estimate + y/n prompt: how many
+  candidate routes, worst-case scrape count, rough time at the current
+  pacing.
 
 ## `search-api/`
 

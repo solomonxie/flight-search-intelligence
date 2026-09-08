@@ -94,14 +94,19 @@ func Search(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 	log.Info("candidate hubs ready",
 		"considered", plan.CandidatesConsidered, "after_geometry_prune", plan.CandidatesAfterGeometryPrune)
 
-	// Step 2: best-first, budget-bounded loop (see DESIGN.md
-	// "Exploration algorithm" for the full derivation).
+	// Step 2: best-first loop, exhaustive by default (see DESIGN.md
+	// "Exploration algorithm" for the full derivation). QueryBudget <= 0
+	// (the default) means no artificial cap — the loop runs every
+	// surviving candidate until the (*) frontier-cutoff below proves
+	// nothing left can beat `best`, which is what makes the result
+	// actually the best option, not just a good-enough one found fast.
+	// A positive QueryBudget trades that guarantee for a bounded run.
 	for i, c := range survivors {
 		if best != nil && c.LBUSD >= best.PriceUSD {
 			markRemaining(plan, survivors[i:], i+1, "frontier_cutoff", "LB >= best.price")
 			break
 		}
-		if queriesUsed >= p.QueryBudget {
+		if !withinBudget(queriesUsed, p.QueryBudget) {
 			markRemaining(plan, survivors[i:], i+1, "budget_exhausted", "query budget exhausted")
 			break
 		}
@@ -137,7 +142,7 @@ func Search(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 			continue
 		}
 
-		if queriesUsed >= p.QueryBudget {
+		if !withinBudget(queriesUsed, p.QueryBudget) {
 			outcome.Outcome = "pruned"
 			outcome.Reason = "query budget exhausted before leg 2"
 			plan.CandidatesRanked = append(plan.CandidatesRanked, outcome)
