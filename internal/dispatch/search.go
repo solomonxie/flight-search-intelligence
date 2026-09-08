@@ -92,8 +92,8 @@ func runSearch(ctx context.Context, deps routesearch.Deps, req agents.CollectRou
 		return agents.CollectRouteResult{}, fmt.Errorf("dispatch: resolving destination %q: %w", req.Destination, err)
 	}
 
-	roundTrip := req.TripType == "round_trip" && req.ReturnDateFrom != ""
-	flexible := req.DepartDateFrom != req.DepartDateTo || (roundTrip && req.ReturnDateFrom != req.ReturnDateTo)
+	roundTrip := req.TripType == "round_trip" && req.MinReturnDate != ""
+	flexible := req.MinDepartDate != req.MaxDepartDate || (roundTrip && req.MinReturnDate != req.MaxReturnDate)
 
 	if flexible {
 		return runDateRangeSearch(ctx, deps, req, origins, destinations, roundTrip)
@@ -110,7 +110,7 @@ func runSearch(ctx context.Context, deps routesearch.Deps, req agents.CollectRou
 			plan, err := routesearch.Search(ctx, deps, routesearch.Params{
 				Origin:            o,
 				Destination:       d,
-				DepartDate:        req.DepartDateFrom,
+				DepartDate:        req.MinDepartDate,
 				MaxHours:          req.MaxHours,
 				QueryBudget:       req.QueryBudget,
 				MaxPrice:          req.MaxPrice,
@@ -159,14 +159,14 @@ func runRoundTripSearch(ctx context.Context, deps routesearch.Deps, req agents.C
 			plan, err := routesearch.SearchRoundTrip(ctx, deps, routesearch.Params{
 				Origin:            o,
 				Destination:       d,
-				DepartDate:        req.DepartDateFrom,
+				DepartDate:        req.MinDepartDate,
 				MaxHours:          req.MaxHours,
 				QueryBudget:       req.QueryBudget,
 				MaxPrice:          req.MaxPrice,
 				MinLayoverMinutes: req.MinLayoverMinutes,
 				MaxLayoverMinutes: req.MaxLayoverMinutes,
 				PricePerMile:      0.08,
-			}, req.ReturnDateFrom)
+			}, req.MinReturnDate)
 			if err != nil {
 				lastErr = err // one candidate airport pair failing shouldn't sink every other candidate
 				continue
@@ -224,13 +224,13 @@ func runDateRangeSearch(ctx context.Context, deps routesearch.Deps, req agents.C
 					PricePerMile:      0.08,
 				},
 				RoundTrip:      roundTrip,
-				DepartFrom:     req.DepartDateFrom,
-				DepartTo:       req.DepartDateTo,
-				ReturnFrom:     req.ReturnDateFrom,
-				ReturnTo:       req.ReturnDateTo,
+				DepartFrom:     req.MinDepartDate,
+				DepartTo:       req.MaxDepartDate,
+				ReturnFrom:     req.MinReturnDate,
+				ReturnTo:       req.MaxReturnDate,
 				StepDays:       req.StepDays,
-				AvailableFrom:  req.RoundTripFrom,
-				AvailableUntil: req.RoundTripTo,
+				AvailableFrom:  req.MinRoundTripDate,
+				AvailableUntil: req.MaxRoundTripDate,
 			})
 			if err != nil {
 				lastErr = err // one candidate airport pair failing shouldn't sink every other candidate

@@ -13,22 +13,22 @@ type CollectRouteRequest struct {
 	Origin      string
 	Destination string
 	TripType    string // "one_way" | "round_trip" | "" (unresolved) — see Spec.TripType; dispatch.runSearch routes "round_trip" to routesearch.SearchRoundTrip instead of the plain one-way Search
-	// DepartDateFrom/DepartDateTo, ReturnDateFrom/DateTo: see
-	// Spec.DepartDateFrom's doc — From == To is an exact date; From < To
+	// MinDepartDate/MaxDepartDate, MinReturnDate/DateTo: see
+	// Spec.MinDepartDate's doc — From == To is an exact date; From < To
 	// makes this a flexible search (dispatch.runSearch routes it to
 	// routesearch.SearchDateRange, pricing every date/combination in the
 	// range(s) and keeping the cheapest, instead of the fixed-date
 	// Search/SearchRoundTrip).
-	DepartDateFrom string
-	DepartDateTo   string
-	ReturnDateFrom string
-	ReturnDateTo   string
-	// RoundTripFrom/RoundTripTo: see Spec.RoundTripFrom's doc — an outer
+	MinDepartDate string
+	MaxDepartDate   string
+	MinReturnDate string
+	MaxReturnDate   string
+	// MinRoundTripDate/MaxRoundTripDate: see Spec.MinRoundTripDate's doc — an outer
 	// eligibility bound both dates must fall within (e.g. limited paid
 	// leave), narrower than the ranges above, which only control what
 	// gets priced.
-	RoundTripFrom     string
-	RoundTripTo       string
+	MinRoundTripDate     string
+	MaxRoundTripDate       string
 	MaxHours          float64
 	QueryBudget       int
 	MaxPrice          int // USD hard ceiling on the whole trip; 0 = no cap

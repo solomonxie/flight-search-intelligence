@@ -24,28 +24,28 @@ func TestValidateDates(t *testing.T) {
 	}{
 		{
 			name:           "return before depart is cleared",
-			in:             Spec{TripType: "round_trip", DepartDateFrom: "2026-12-15", DepartDateTo: "2026-12-15", ReturnDateFrom: "2026-01-01", ReturnDateTo: "2026-01-01"},
+			in:             Spec{TripType: "round_trip", MinDepartDate: "2026-12-15", MaxDepartDate: "2026-12-15", MinReturnDate: "2026-01-01", MaxReturnDate: "2026-01-01"},
 			wantDepartFrom: "2026-12-15", wantDepartTo: "2026-12-15",
 			wantReturnFrom: "", wantReturnTo: "",
 			wantNote: true,
 		},
 		{
 			name:           "return equal to depart is cleared",
-			in:             Spec{TripType: "round_trip", DepartDateFrom: "2026-12-15", DepartDateTo: "2026-12-15", ReturnDateFrom: "2026-12-15", ReturnDateTo: "2026-12-15"},
+			in:             Spec{TripType: "round_trip", MinDepartDate: "2026-12-15", MaxDepartDate: "2026-12-15", MinReturnDate: "2026-12-15", MaxReturnDate: "2026-12-15"},
 			wantDepartFrom: "2026-12-15", wantDepartTo: "2026-12-15",
 			wantReturnFrom: "", wantReturnTo: "",
 			wantNote: true,
 		},
 		{
 			name:           "return after depart is untouched",
-			in:             Spec{TripType: "round_trip", DepartDateFrom: "2026-12-15", DepartDateTo: "2026-12-15", ReturnDateFrom: "2026-12-22", ReturnDateTo: "2026-12-22"},
+			in:             Spec{TripType: "round_trip", MinDepartDate: "2026-12-15", MaxDepartDate: "2026-12-15", MinReturnDate: "2026-12-22", MaxReturnDate: "2026-12-22"},
 			wantDepartFrom: "2026-12-15", wantDepartTo: "2026-12-15",
 			wantReturnFrom: "2026-12-22", wantReturnTo: "2026-12-22",
 			wantNote: false,
 		},
 		{
 			name:           "one-way with no return date is untouched",
-			in:             Spec{TripType: "one_way", DepartDateFrom: "2026-12-15", DepartDateTo: "2026-12-15"},
+			in:             Spec{TripType: "one_way", MinDepartDate: "2026-12-15", MaxDepartDate: "2026-12-15"},
 			wantDepartFrom: "2026-12-15", wantDepartTo: "2026-12-15",
 			wantReturnFrom: "", wantReturnTo: "",
 			wantNote: false,
@@ -57,7 +57,7 @@ func TestValidateDates(t *testing.T) {
 		},
 		{
 			name:           "a reversed departure range is swapped back into order",
-			in:             Spec{DepartDateFrom: "2026-12-31", DepartDateTo: "2026-12-15"},
+			in:             Spec{MinDepartDate: "2026-12-31", MaxDepartDate: "2026-12-15"},
 			wantDepartFrom: "2026-12-15", wantDepartTo: "2026-12-31",
 			wantNote: false,
 		},
@@ -65,11 +65,11 @@ func TestValidateDates(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := validateDates(tt.in)
-			if got.DepartDateFrom != tt.wantDepartFrom || got.DepartDateTo != tt.wantDepartTo {
-				t.Errorf("DepartDateFrom/To = %q/%q, want %q/%q", got.DepartDateFrom, got.DepartDateTo, tt.wantDepartFrom, tt.wantDepartTo)
+			if got.MinDepartDate != tt.wantDepartFrom || got.MaxDepartDate != tt.wantDepartTo {
+				t.Errorf("MinDepartDate/MaxDepartDate = %q/%q, want %q/%q", got.MinDepartDate, got.MaxDepartDate, tt.wantDepartFrom, tt.wantDepartTo)
 			}
-			if got.ReturnDateFrom != tt.wantReturnFrom || got.ReturnDateTo != tt.wantReturnTo {
-				t.Errorf("ReturnDateFrom/To = %q/%q, want %q/%q", got.ReturnDateFrom, got.ReturnDateTo, tt.wantReturnFrom, tt.wantReturnTo)
+			if got.MinReturnDate != tt.wantReturnFrom || got.MaxReturnDate != tt.wantReturnTo {
+				t.Errorf("MinReturnDate/MaxReturnDate = %q/%q, want %q/%q", got.MinReturnDate, got.MaxReturnDate, tt.wantReturnFrom, tt.wantReturnTo)
 			}
 			if hasNote := len(got.Notes) > 0; hasNote != tt.wantNote {
 				t.Errorf("Notes = %v, want a note: %v", got.Notes, tt.wantNote)
