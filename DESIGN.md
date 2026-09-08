@@ -171,7 +171,10 @@ or to stop.
    concrete arguments; defer (booking horizon, or "wait, the user might
    still be adding context"); **ask the user a clarifying question** (the
    spec is genuinely underspecified — e.g. no return date and no
-   indication it's one-way — not just "could be narrower"); or finalize.
+   indication it's one-way — not just "could be narrower"); **ask the
+   user to confirm the cost** of a search whose estimate crosses some
+   threshold before dispatching it (see "Confirming search cost" below —
+   this is a deferred idea, not built); or finalize.
 3. **Dispatch and await.** A tool call is one row inserted into
    `agent_tasks`, plus a tiny Kafka message ("this task is ready to run")
    — the agent doesn't run `routesearch` itself, it hands the request off
@@ -193,6 +196,44 @@ or to stop.
    LLM-drafting idea already in "Components") and, for a not-fully-solved
    case, say so honestly rather than presenting a partial answer as
    final.
+
+**Confirming search cost (deferred idea, not built).** `routesearch`'s
+default is now unlimited/exhaustive (see "Query budget: unlimited by
+default, an optional cap" under "Cheap multi-leg route search" below) —
+right for a person watching `cmd/routesearch` run in a terminal, who
+sees the estimate and decides live, but the email path has no live
+terminal: a request that looks small can still turn into a long,
+possibly surprising run with nobody watching. The fix mirrors
+`cmd/routesearch`'s own pre-search prompt (`cmd/routesearch/confirm.go`)
+rather than reinventing it: before the first dispatch of a request whose
+estimate crosses some threshold, park it in `awaiting_user` (the same
+state `ask_user`/`ActionAskClarification` already uses) with a
+confirmation email instead of dispatching straight away.
+
+**The confirmation message itself is a fixed Go template filled with
+numbers, never LLM-drafted text** — the same principle "Go stays narrow"
+already establishes for `routesearch` throughout this document, applied
+to this action too. `DecideNextAction`'s only job here is emitting the
+lightweight signal ("this request needs a cost confirmation, here are
+the dispatch arguments it would use"); the actual candidate-count/
+query-count/time-estimate numbers come from the same deterministic
+estimator `cmd/routesearch/confirm.go` already has (`ResolveCandidates`
++ `hubEstimate`'s arithmetic — no scraping, no LLM call), rendered into
+one fixed template. Two reasons this isn't the LLM's job: the numbers
+have to be trustworthy and reproducible (an LLM paraphrasing "up to 113
+scrapes" risks quietly getting the arithmetic wrong), and it's the exact
+same estimate either surface would show, so computing it twice in two
+different ways (one deterministic, one LLM-drafted) would be pure
+duplication for a worse result. A user's reply ("yes, go ahead" / a
+changed constraint) reaches `Decide` the same way any other follow-up
+does ("Continuous email / mid-flight interruption" above) — no new
+mechanism, just a new reason a request can be sitting in
+`awaiting_user`.
+
+**Open**: the threshold itself (flat query-count cutoff, or scaled by
+how open-ended the request's `MaxLegs`/date-window is), and whether
+`Spec` needs its own field to skip confirmation for a user who's already
+said "just find me the best price, however long it takes."
 
 **Spec's concrete fields, precisely — and the gap between this and what's
 built.** The rule for which list a constraint goes in isn't "how
@@ -725,11 +766,20 @@ unbounded fan-out over every airport on Earth):
    price-per-mile prior) is already ≥ the current best full price, skip
    the second scrape entirely — half the candidate's cost avoided
    without ever fetching it.
-5. **Hard query budget.** A fixed cap on scrapes per user request
-   (default: 20) regardless of candidate-list size. An anytime algorithm:
-   if the budget runs out, return the best feasible combo found so far,
-   never search exhaustively — the cap is what keeps this from becoming
-   the mass-crawl "Collection scope" rules out.
+5. **Query budget: unlimited by default, an optional cap.** `QUERY_BUDGET
+   <= 0` (the default) means run every surviving candidate to the (*)
+   frontier-cutoff below — exhaustive, provably-optimal-within-the-
+   candidate-set search is the actual selling point over a plain flight
+   search (root `README.md` "Why this beats a plain flight search"), and
+   the project's SLA is days, not seconds, so there's no reason to settle
+   for less. A positive `QUERY_BUDGET` reintroduces the earlier anytime
+   behavior — stop early, return the best feasible combo found so far —
+   for a caller that explicitly wants a bounded, faster/cheaper run
+   instead (e.g. the email agent loop's default cap; see "Agent loop"
+   above). Either way, "Collection scope" is unaffected: per-request cost
+   still can't exceed the candidate list a real route graph produces, and
+   collection is still triggered only by an actual request, never a
+   broad crawl.
 6. **Depth cap.** 1-stop split-ticket combos by default — cost grows
    multiplicatively per extra hop, and so does self-transfer risk (below).
    Raisable via `MaxLegs`; see "Deeper itineraries" below.
@@ -808,18 +858,25 @@ routing on Earth — a cheap fare through a hub the geometry prune excluded
 is a false negative this algorithm accepts by construction (see "Hub
 candidate source" below).
 
-**Two independent stopping conditions, doing different jobs**: the `(*)`
-bound-crossing break is what makes results *provably good* (given the
-candidate set); `QUERY_BUDGET` is what makes the algorithm *provably
-terminate quickly* regardless of how good the bounds turn out to be —
-early on, with no cached prices yet, `hEst` is loose and `(*)` may rarely
-trigger, so the budget is the real backstop, not a formality.
+**Two independent stopping conditions, doing different jobs — one always
+on, one optional**: the `(*)` bound-crossing break is what makes results
+*provably good* (given the candidate set), and by default it's the only
+thing that stops the loop, which is what makes the result the actual
+best option rather than a good-enough one found fast. `QUERY_BUDGET`,
+when a caller sets it above 0, is what makes the algorithm *provably
+terminate quickly* instead — a deliberate trade of that optimality
+guarantee for a bounded run. Worth knowing if you do set it: early on,
+with no cached prices yet, `hEst` is loose and `(*)` may rarely trigger,
+so a low budget is a real, frequently-hit backstop, not just a formality.
 
-**Anytime property**: because the frontier is processed best-first,
-`best` after any prefix of the loop is a reasonable answer — running out
-of `QUERY_BUDGET` mid-loop degrades result quality gracefully (it just
-means fewer, less-likely-to-win candidates went unexplored) rather than
-failing outright.
+**Anytime property, when a budget is set**: because the frontier is
+processed best-first, `best` after any prefix of the loop is a
+reasonable answer — running out of a positive `QUERY_BUDGET` mid-loop
+degrades result quality gracefully (it just means fewer,
+less-likely-to-win candidates went unexplored) rather than failing
+outright. With the default unlimited budget this property is moot: the
+loop simply runs to the `(*)` cutoff or the frontier's end, whichever
+comes first.
 
 **Generalizing beyond 1-stop**: 2-stop search reuses the identical loop,
 but a hub can now be reached via more than one first leg with different
@@ -869,9 +926,14 @@ duration_so_far, legs_so_far)`, discarded the moment another label at the
 same node dominates it. `legs_so_far` is now also a hard cutoff: no label
 expands past `MaxLegs`. Cost is genuinely multiplicative per extra hop —
 candidate hubs at hop 2 branch into candidates at hop 3 branch into hop
-4 — so `QUERY_BUDGET` (same concept, likely needs to rise for this case)
-is what keeps a 5-leg request from becoming exhaustive, same as it
-already keeps 1-stop from becoming exhaustive today.
+4 — so unlimited `QUERY_BUDGET` (the default, same semantics as 1-stop)
+means a high `MaxLegs` really does explore exhaustively, which is the
+point: real-world runs have seen 100+ scrapes from a single
+well-connected origin before even reaching hop 2 (IMPLEMENTATION_PLAN.md
+Phase 3) — expected under this design, not a bug, and exactly why
+`cmd/routesearch` confirms the estimated cost before running (see
+`cmd/README.md`). Set `QUERY_BUDGET` explicitly for a bounded run
+instead.
 
 **Country/region hop constraints — a new edge filter, cheap to apply.**
 OpenFlights' airport table already carries `Country` per airport
@@ -916,10 +978,12 @@ until a concrete one is actually needed rather than guessed at now.
   `Params` now, and whether country-only is enough to start or region
   (needing a country→region mapping, which doesn't exist yet) is needed
   too.
-- **Query budget at depth**: not asked — `QUERY_BUDGET` stays a flat
-  default today; a 5-leg search plausibly needs a higher one. Say so if
-  you want it to scale with `MaxLegs` automatically, or stay a single
-  manually-set number.
+- **Resolved: no scaling needed.** `QUERY_BUDGET`'s default is now
+  unlimited (see "Bounding the search" above), so "a 5-leg search
+  plausibly needs a higher budget" no longer applies — there's no cap to
+  raise. Still open if a caller does set an explicit `QUERY_BUDGET`: say
+  so if you want it to scale with `MaxLegs` automatically rather than
+  stay a single manually-set number.
 
 ### Round trips and flexible dates
 
@@ -989,11 +1053,15 @@ questions the audit trail exists to answer.
 **Open decisions** (same convention as elsewhere in this doc):
 - **Date window**: not asked — defaulting to **±3 days** each end that
   was given. Say so if you want it wider/narrower, or asymmetric.
-- **Sweep budget**: not asked — defaulting to a **separate budget from
-  the hub QUERY_BUDGET** (not shared) — date-sweep queries are cheap
-  (one per date combo) and hub queries are expensive (multiple per
-  candidate), so they shouldn't compete for the same cap. Say so if you'd
-  rather they share one pool.
+- **Sweep budget**: unaffected by "Query budget: unlimited by default"
+  above — `QUERY_BUDGET <= 0` still means unlimited for Phase A's date
+  grid too, so by default the whole window gets priced. Still not asked:
+  whether Phase A and Phase B should draw from separate counters once a
+  caller *does* set a positive `QUERY_BUDGET` (date-sweep queries are
+  cheap, one per date combo; hub queries are expensive, multiple per
+  candidate) — today they're both just `Base.QueryBudget`, checked
+  independently per phase rather than a single shared running count. Say
+  so if you want that changed.
 - **Top-K dates into Phase B**: not asked — defaulting to **1** (just the
   outright winner) rather than running hub search on several near-tied
   dates. Say so if you want hub search hedged across, e.g., the top 3.
@@ -1134,9 +1202,16 @@ however long a bounded query budget's worth of spacing adds up to (worst
 case, hours) is not the "outlive the process" problem a months-long wait is.
 `QUERY_BUDGET` (see "Exploration algorithm" above) keeps its job of
 capping total scrape *volume* per request, but its reason for existing
-shifts from "bound latency" to "bound how much of this one user's search
-gets spread across how much of the provider's attention" — spacing
-solves politeness; the budget solves cost/scope.
+here shifts from "bound latency" to "bound how much of this one user's
+search gets spread across how much of the provider's attention" —
+spacing solves politeness; the budget solves cost/scope. This is also
+why the email/agent path sets an explicit, positive `QUERY_BUDGET`
+(default 20, below) rather than leaving it unset: `routesearch`'s own
+package default is now unlimited/exhaustive (the CLI's selling point —
+root `README.md`), which is the right default for a person watching one
+request run in a terminal, wrong for an inbound-email pipeline whose
+whole reason for existing is bounding scrape volume per stranger's
+request ("Collection scope").
 
 (A parallel-wave version of the same algorithm — precompute several
 candidates, dispatch their leg-queries concurrently — was considered and
@@ -1207,8 +1282,11 @@ ever proves too slow.
 **Open decisions** (defaults chosen the same way as elsewhere in this
 doc — say so if you'd rather change them):
 - **Query budget**: not asked — defaulting to **20 scrapes/request**,
-  now read as a cost/scope cap rather than a latency cap (see above).
-  Say so if you want it higher/lower, or configurable per request.
+  now read as a cost/scope cap rather than a latency cap (see above), and
+  now an explicit override of `routesearch`'s own unlimited package
+  default rather than "leave it at the default" (see above). Say so if
+  you want it higher/lower, unlimited here too, or configurable per
+  request.
 - **Max depth**: see "Deeper itineraries: N-hop search and hop-country
   constraints" above — `MaxLegs`, a tunable `Params` field, default
   still 1-stop.

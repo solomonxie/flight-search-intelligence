@@ -12,10 +12,17 @@ import (
 // Params is one user request's constraints. One-way only for now — see
 // the package doc for what else is deliberately out of scope.
 type Params struct {
-	Origin            string
-	Destination       string
-	DepartDate        string // YYYY-MM-DD
-	MaxHours          float64
+	Origin      string
+	Destination string
+	DepartDate  string // YYYY-MM-DD
+	MaxHours    float64
+	// QueryBudget caps how many scrapes the search may spend. <= 0 (the
+	// default) means unlimited: the search runs exhaustively, every
+	// surviving candidate, until the frontier's own provably-optimal
+	// cutoff proves nothing left can beat the current best — this is
+	// the project's core selling point over a plain flight search (see
+	// README). A positive value trades that optimality guarantee for a
+	// bounded, faster/cheaper run.
 	QueryBudget       int
 	MinLayoverMinutes int
 	MaxLayoverMinutes int

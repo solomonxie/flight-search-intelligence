@@ -46,11 +46,14 @@ type DateRangeParams struct {
 
 // SearchDateRange runs the grid: Phase A prices every (depart, return)
 // pair — or just every depart date, for one-way — within the given
-// ranges (cheap, baseline-only, no hub search), stopping early if
-// Base.QueryBudget is exhausted (an anytime algorithm, same principle
-// as Search's own query budget: a truncated grid still returns the best
-// of what it priced, rather than refusing to answer). Phase B then runs
-// the full hub search on the cheapest eligible pair found.
+// ranges (cheap, baseline-only, no hub search). Base.QueryBudget <= 0
+// (the default) means unlimited: every combination in the grid gets
+// priced, so Phase B's winner is the actual cheapest date, not just the
+// cheapest one reached before a cap. A positive Base.QueryBudget stops
+// the grid early (an anytime algorithm at that point: a truncated grid
+// still returns the best of what it priced, rather than refusing to
+// answer). Phase B then runs the full hub search on the cheapest
+// eligible pair found.
 func SearchDateRange(ctx context.Context, deps Deps, p DateRangeParams) (*FlexiblePlan, error) {
 	requestID := fmt.Sprintf("GRID-%s-%s-%d", p.Base.Origin, p.Base.Destination, time.Now().UnixNano())
 	log := deps.Logger.With("request_id", requestID)
@@ -75,7 +78,7 @@ func SearchDateRange(ctx context.Context, deps Deps, p DateRangeParams) (*Flexib
 	if !p.RoundTrip {
 		log.Info("phase A: date-range scan (one-way)", "departures", len(departDates))
 		for _, d := range departDates {
-			if queriesUsed >= p.Base.QueryBudget {
+			if !withinBudget(queriesUsed, p.Base.QueryBudget) {
 				budgetExhausted = true
 				break
 			}
@@ -101,7 +104,7 @@ func SearchDateRange(ctx context.Context, deps Deps, p DateRangeParams) (*Flexib
 				if r <= d {
 					continue // a return on or before its own depart is never valid, not even worth a query
 				}
-				if queriesUsed >= p.Base.QueryBudget {
+				if !withinBudget(queriesUsed, p.Base.QueryBudget) {
 					budgetExhausted = true
 					break outer
 				}
