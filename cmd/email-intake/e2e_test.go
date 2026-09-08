@@ -249,7 +249,7 @@ func TestAgentLoop_CompleteRequestDispatches(t *testing.T) {
 	}
 }
 
-// --- Case: an explicit flexible-date request (a real DepartDateFrom..To
+// --- Case: an explicit flexible-date request (a real MinDepartDate..To
 // range) must actually scan the window (dispatch.runDateRangeSearch),
 // not just price one date in it — and the final answer should say which
 // date won.
@@ -263,8 +263,8 @@ func TestAgentLoop_FlexibleDates(t *testing.T) {
 	}
 
 	spec := h.spec(row)
-	if spec.DepartDateFrom == spec.DepartDateTo {
-		t.Fatalf("DepartDateFrom == DepartDateTo (%q) — an explicit \"give or take N days\" should have produced a real range", spec.DepartDateFrom)
+	if spec.MinDepartDate == spec.MaxDepartDate {
+		t.Fatalf("MinDepartDate == MaxDepartDate (%q) — an explicit \"give or take N days\" should have produced a real range", spec.MinDepartDate)
 	}
 
 	var rounds []agents.RoundRecord
@@ -300,15 +300,15 @@ func TestAgentLoop_NextMonthCrossesYearBoundary(t *testing.T) {
 	row := h.turn("round trip from YVR to PEK, depart next " + monthName + ", return a week later")
 
 	spec := h.spec(row)
-	if spec.DepartDateFrom == "" {
-		t.Fatalf("DepartDateFrom never got resolved: %+v (email: %s)", spec, row.EmailBody.String)
+	if spec.MinDepartDate == "" {
+		t.Fatalf("MinDepartDate never got resolved: %+v (email: %s)", spec, row.EmailBody.String)
 	}
-	departYear := spec.DepartDateFrom[:4]
+	departYear := spec.MinDepartDate[:4]
 	if departYear == fmt.Sprint(thisYear) {
-		t.Errorf("DepartDateFrom = %q, want next year (%d) — %q this year has already happened/is happening now", spec.DepartDateFrom, thisYear+1, monthName)
+		t.Errorf("MinDepartDate = %q, want next year (%d) — %q this year has already happened/is happening now", spec.MinDepartDate, thisYear+1, monthName)
 	}
-	if spec.ReturnDateFrom != "" && spec.ReturnDateFrom <= spec.DepartDateTo {
-		t.Errorf("ReturnDateFrom %q is not after DepartDateTo %q", spec.ReturnDateFrom, spec.DepartDateTo)
+	if spec.MinReturnDate != "" && spec.MinReturnDate <= spec.MaxDepartDate {
+		t.Errorf("MinReturnDate %q is not after MaxDepartDate %q", spec.MinReturnDate, spec.MaxDepartDate)
 	}
 }
 
@@ -333,8 +333,8 @@ func TestAgentLoop_UserRequestsChange(t *testing.T) {
 	if spec.TripType != "one_way" {
 		t.Errorf("TripType = %q after asking for one-way, want %q", spec.TripType, "one_way")
 	}
-	if spec.ReturnDateFrom != "" {
-		t.Errorf("ReturnDateFrom = %q after asking for one-way, want empty", spec.ReturnDateFrom)
+	if spec.MinReturnDate != "" {
+		t.Errorf("MinReturnDate = %q after asking for one-way, want empty", spec.MinReturnDate)
 	}
 	if second.EmailBody.String == firstEmail {
 		t.Error("second answer is byte-identical to the first — looks like it never actually redispatched")

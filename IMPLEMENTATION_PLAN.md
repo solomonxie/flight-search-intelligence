@@ -80,8 +80,8 @@ Phase 1 (the loop to plug into).
       dispatchable tool from the agent loop, not just
       `CollectRouteRequest` — superseded its own first cut (a single
       center date + `WindowDays`/`StepDays`) with independent
-      `DepartDateFrom`/`To` and `ReturnDateFrom`/`To` ranges plus
-      `RoundTripFrom`/`To` (an outer eligibility bound, e.g. limited paid
+      `MinDepartDate`/`To` and `MinReturnDate`/`To` ranges plus
+      `MinRoundTripDate`/`To` (an outer eligibility bound, e.g. limited paid
       leave — distinct from the ranges, which only control what gets
       *priced*) once a live run showed the coupled single-window model
       couldn't express "depart and return each genuinely independently

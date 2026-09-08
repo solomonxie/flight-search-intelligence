@@ -12,28 +12,28 @@ type Spec struct {
 	// blank ReturnDate alone must never be silently read as "one-way";
 	// see missingRequiredFields, which asks explicitly instead).
 	TripType string
-	// DepartDateFrom/DepartDateTo bound when departure may occur —
+	// MinDepartDate/MaxDepartDate bound when departure may occur —
 	// YYYY-MM-DD, inclusive. An exact, non-flexible date is simply
 	// From == To (e.g. a specific "December 15th" sets both to
 	// "2026-12-15"); a real range (From < To) makes this a flexible
 	// search — routesearch.SearchDateRange prices every date in it and
 	// keeps whichever's cheapest, rather than a single fixed date.
-	// ReturnDateFrom/ReturnDateTo are the same idea for the return leg,
+	// MinReturnDate/MaxReturnDate are the same idea for the return leg,
 	// only meaningful when TripType is "round_trip" — depart and return
 	// ranges are independent (see StepDays' doc for the cost tradeoff
 	// that implies), unlike a single fixed trip length.
-	DepartDateFrom string
-	DepartDateTo   string
-	ReturnDateFrom string
-	ReturnDateTo   string
-	// RoundTripFrom/RoundTripTo (round_trip only, optional): an outer
+	MinDepartDate string
+	MaxDepartDate   string
+	MinReturnDate string
+	MaxReturnDate   string
+	// MinRoundTripDate/MaxRoundTripDate (round_trip only, optional): an outer
 	// eligibility bound both the depart and return date must fall
 	// within, e.g. "I only have a month of paid leave" — narrower than
-	// DepartDateFrom/To and ReturnDateFrom/To, which only control what
+	// MinDepartDate/MaxDepartDate and MinReturnDate/MaxReturnDate, which only control what
 	// gets *priced*, not which priced combination is allowed to win.
 	// Blank means no such constraint beyond the ranges themselves.
-	RoundTripFrom     string
-	RoundTripTo       string
+	MinRoundTripDate     string
+	MaxRoundTripDate       string
 	MaxHours          float64
 	QueryBudget       int
 	MaxPrice          int // USD hard ceiling on the whole trip; 0 = no cap
@@ -59,16 +59,47 @@ type Spec struct {
 	// blank field itself, leaving DecideNextAction unable to ask anything
 	// sharper than a generic "what's your destination?" on every retry.
 	Notes []string
+	// LastIntent/LastIntentReasoning are FormSpec's read on what the most
+	// recent text was doing to the Spec (see Intent) — set fresh on every
+	// FormSpec call, not carried forward once stale. DecideNextAction
+	// reads this to judge whether an already-dispatched round's result
+	// still answers the request: IntentRewrite means a field that
+	// already drove a round changed value, not just filled a blank, so
+	// that round's result no longer reflects what's being asked.
+	LastIntent          Intent
+	LastIntentReasoning string
 }
+
+// Intent is FormSpec's classification of what one turn of new text was
+// doing, judged against the existing Spec/rounds so far — DecideNextAction
+// reads it to tell "more detail for the same request" apart from "this
+// changes what was already asked and dispatched."
+type Intent string
+
+const (
+	// IntentNewRequest: this is the first message of a request, or reads
+	// like a wholly separate trip from anything already on file.
+	IntentNewRequest Intent = "new_request"
+	// IntentAdditionalInfo: fills in a field that was blank — narrows or
+	// completes the same request, doesn't contradict anything already set.
+	IntentAdditionalInfo Intent = "additional_info"
+	// IntentRewrite: changes a field that was already set to a different
+	// value (e.g. round-trip to one-way, a new destination) — any round
+	// already dispatched under the old value is stale.
+	IntentRewrite Intent = "rewrite"
+	// IntentQuestion: not asking for a (new) search at all — a question
+	// about a result already given, answerable from context on file.
+	IntentQuestion Intent = "question_about_result"
+)
 
 // toCollectRouteRequest is the spec's own view as a dispatch argument
 // set — what round 1 (no prior round to copy instead) dispatches with.
 func (s Spec) toCollectRouteRequest() CollectRouteRequest {
 	return CollectRouteRequest{
 		Origin: s.Origin, Destination: s.Destination, TripType: s.TripType,
-		DepartDateFrom: s.DepartDateFrom, DepartDateTo: s.DepartDateTo,
-		ReturnDateFrom: s.ReturnDateFrom, ReturnDateTo: s.ReturnDateTo,
-		RoundTripFrom: s.RoundTripFrom, RoundTripTo: s.RoundTripTo,
+		MinDepartDate: s.MinDepartDate, MaxDepartDate: s.MaxDepartDate,
+		MinReturnDate: s.MinReturnDate, MaxReturnDate: s.MaxReturnDate,
+		MinRoundTripDate: s.MinRoundTripDate, MaxRoundTripDate: s.MaxRoundTripDate,
 		MaxHours: s.MaxHours, QueryBudget: s.QueryBudget, MaxPrice: s.MaxPrice,
 		MinLayoverMinutes: s.MinLayoverMinutes, MaxLayoverMinutes: s.MaxLayoverMinutes,
 		SearchRadiusKm: s.SearchRadiusKm, StepDays: s.StepDays,

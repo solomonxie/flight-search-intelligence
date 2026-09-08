@@ -33,9 +33,9 @@ func bookingLink(rounds []RoundRecord) string {
 	// A flexible search's request only carries the range that was
 	// priced; ChosenDepartDate/ChosenReturnDate (set once the search
 	// actually ran) is the real date that won and what the link should
-	// point at — DepartDateFrom is just the fallback for a non-flexible
+	// point at — MinDepartDate is just the fallback for a non-flexible
 	// exact search, where From already equals the one date searched.
-	depart := req.DepartDateFrom
+	depart := req.MinDepartDate
 	if round.Result.ChosenDepartDate != "" {
 		depart = round.Result.ChosenDepartDate
 	}
@@ -45,7 +45,7 @@ func bookingLink(rounds []RoundRecord) string {
 		DepartureDate: depart,
 	}
 	if req.TripType == "round_trip" {
-		ret := req.ReturnDateFrom
+		ret := req.MinReturnDate
 		if round.Result.ChosenReturnDate != "" {
 			ret = round.Result.ChosenReturnDate
 		}
