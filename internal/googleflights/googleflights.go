@@ -17,6 +17,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"flight-search-intelligence/internal/ratelimit"
 )
 
 const searchURL = "https://www.google.com/travel/flights/search"
@@ -149,11 +151,33 @@ func (p SearchParams) toQuery() Query {
 // Client fetches Google Flights search results over plain HTTP.
 type Client struct {
 	HTTPClient *http.Client
+	// Limiter paces every real HTTP call this Client makes — see
+	// internal/ratelimit's package doc. NewClient wires every Client it
+	// builds to the same processSharedLimiter instance, since the whole
+	// point is pacing shared across every concurrent goroutine in the
+	// process, not per-Client state; nil (a Client built by hand, e.g. in
+	// a test) skips pacing entirely.
+	Limiter ratelimit.Limiter
 }
 
-// NewClient builds a Client with sane defaults.
+// processSharedLimiter is the one rate limiter every Client NewClient
+// builds shares — DESIGN.md "a shared, process-wide rate limiter":
+// cmd/collector -worker's goroutine pool runs several requests'
+// searches concurrently, each with its own Client; without one shared
+// instance, real scrape throughput would scale with worker concurrency
+// rather than staying capped regardless of it. Numbers are a starting
+// point, not a measured limit from Google — tune here if they prove too
+// tight/loose in practice.
+var processSharedLimiter = ratelimit.NewFixedWindow(
+	ratelimit.Window{Per: 2 * time.Second, Max: 1},
+	ratelimit.Window{Per: time.Minute, Max: 20},
+	ratelimit.Window{Per: time.Hour, Max: 200},
+)
+
+// NewClient builds a Client with sane defaults, wired to the process-wide
+// shared rate limiter.
 func NewClient() *Client {
-	return &Client{HTTPClient: &http.Client{Timeout: 30 * time.Second}}
+	return &Client{HTTPClient: &http.Client{Timeout: 30 * time.Second}, Limiter: processSharedLimiter}
 }
 
 // SearchFlightOffers fetches results for p and returns both the parsed
@@ -191,6 +215,11 @@ func queryURL(q Query) string {
 }
 
 func (c *Client) search(ctx context.Context, q Query) ([]Offer, []byte, error) {
+	if c.Limiter != nil {
+		if err := c.Limiter.Wait(ctx); err != nil {
+			return nil, nil, fmt.Errorf("googleflights: rate limiter: %w", err)
+		}
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, queryURL(q), nil)
 	if err != nil {
 		return nil, nil, err
