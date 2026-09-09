@@ -59,7 +59,7 @@ func SearchRoundTrip(ctx context.Context, deps Deps, p Params, returnDate string
 		RequestID: requestID, Origin: p.Origin, Destination: p.Destination,
 		DepartDate: p.DepartDate, ReturnDate: returnDate, Status: "running",
 	}
-	_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
+	savePlan(ctx, deps, requestID, plan.Status, plan)
 
 	log.Info("querying bundled round-trip baseline")
 	bundledOffers, live, err := deps.searchOffers(ctx, googleflights.SearchParams{
@@ -93,7 +93,7 @@ func SearchRoundTrip(ctx context.Context, deps Deps, p Params, returnDate string
 	outboundPlan, err := Search(ctx, deps, p)
 	if err != nil {
 		plan.Status = fmt.Sprintf("error: outbound leg: %v", err)
-		_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
+		savePlan(ctx, deps, requestID, plan.Status, plan)
 		return plan, fmt.Errorf("routesearch: outbound leg: %w", err)
 	}
 	plan.OutboundPlanID = outboundPlan.RequestID
@@ -106,7 +106,7 @@ func SearchRoundTrip(ctx context.Context, deps Deps, p Params, returnDate string
 	returnPlan, err := Search(ctx, deps, returnParams)
 	if err != nil {
 		plan.Status = fmt.Sprintf("error: return leg: %v", err)
-		_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
+		savePlan(ctx, deps, requestID, plan.Status, plan)
 		return plan, fmt.Errorf("routesearch: return leg: %w", err)
 	}
 	plan.ReturnPlanID = returnPlan.RequestID
@@ -125,7 +125,7 @@ func SearchRoundTrip(ctx context.Context, deps Deps, p Params, returnDate string
 
 	plan.Result = combineRoundTrip(plan, outboundBest, returnBest, summed)
 	plan.Status = "done"
-	_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
+	savePlan(ctx, deps, requestID, plan.Status, plan)
 	log.Info("round trip search done", "queries_used", plan.QueriesUsed)
 	return plan, nil
 }

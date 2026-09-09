@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	"flight-search-intelligence/internal/catalog"
+	"flight-search-intelligence/internal/tracefile"
 )
 
 // RedispatchCap is DESIGN.md's resolved default: "3 rounds before forced
@@ -156,7 +157,56 @@ func Decide(ctx context.Context, llm LLMClient, db *catalog.SQLite, requestID st
 	if err != nil {
 		return "", false, fmt.Errorf("agents: encoding rounds for %s: %w", requestID, err)
 	}
-	return "", false, db.SaveAgentRequestState(ctx, requestID, StatusFinalized, roundsJSON, nil, emailBody, finalizedBy)
+	if err := db.SaveAgentRequestState(ctx, requestID, StatusFinalized, roundsJSON, nil, emailBody, finalizedBy); err != nil {
+		return "", false, err
+	}
+	writeCombinedTraceFile(ctx, db, requestID, spec, rounds, finalizedBy, emailBody)
+	return "", false, nil
+}
+
+// combinedTrace is DESIGN.md "Wide fuzzy-range search... a trace file"'s
+// finalize-step export: one file per finalized request, joining the
+// conversation-level trail (this Spec/Decision/Reasoning per round) with
+// the routesearch-level plan each dispatched round actually produced —
+// fetched back out of route_search_plans by request id, not duplicated
+// at dispatch time (routesearch already writes its own trace file per
+// entry point; this one exists to join it with the conversation that led
+// to it).
+type combinedTrace struct {
+	RequestID   string               `json:"request_id"`
+	Spec        Spec                 `json:"spec"`
+	FinalizedBy string               `json:"finalized_by"`
+	EmailBody   string               `json:"email_body"`
+	Rounds      []combinedTraceRound `json:"rounds"`
+}
+
+// combinedTraceRound is one RoundRecord plus its own routesearch plan
+// joined in, if that round actually dispatched a search.
+type combinedTraceRound struct {
+	Round           int                 `json:"round"`
+	Spec            Spec                `json:"spec"`
+	Decision        Decision            `json:"decision"`
+	TaskID          string              `json:"task_id,omitempty"`
+	Result          *CollectRouteResult `json:"result,omitempty"`
+	RouteSearchPlan json.RawMessage     `json:"route_search_plan,omitempty"`
+}
+
+// writeCombinedTraceFile is best-effort, same stance routesearch's own
+// per-entry-point trace-file write already takes: a failure here should
+// never fail finalization itself, which has already committed to the DB
+// by the time this runs.
+func writeCombinedTraceFile(ctx context.Context, db *catalog.SQLite, requestID string, spec Spec, rounds []RoundRecord, finalizedBy, emailBody string) {
+	trace := combinedTrace{RequestID: requestID, Spec: spec, FinalizedBy: finalizedBy, EmailBody: emailBody}
+	for _, r := range rounds {
+		tr := combinedTraceRound{Round: r.Round, Spec: r.Spec, Decision: r.Decision, TaskID: r.TaskID, Result: r.Result}
+		if r.Result != nil && r.Result.RequestID != "" {
+			if planJSON, _, err := db.GetRouteSearchPlan(ctx, r.Result.RequestID); err == nil {
+				tr.RouteSearchPlan = json.RawMessage(planJSON)
+			}
+		}
+		trace.Rounds = append(trace.Rounds, tr)
+	}
+	_, _ = tracefile.Write(requestID, trace)
 }
 
 // RecordTaskResult is what cmd/collector calls right after it saves a
