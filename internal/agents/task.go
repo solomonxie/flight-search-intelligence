@@ -40,6 +40,19 @@ type CollectRouteRequest struct {
 	// defaults to 1 (every day). Only matters when a range is genuinely
 	// flexible.
 	StepDays int
+	// MinTripLengthDays/MaxTripLengthDays/TripLengthStepDays: see
+	// Spec.MinTripLengthDays's doc — a trip-length tolerance range coupled
+	// to MinDepartDate/MaxDepartDate, mutually exclusive with
+	// MinReturnDate/MaxReturnDate.
+	MinTripLengthDays  int
+	MaxTripLengthDays  int
+	TripLengthStepDays int
+	// MaxCountries/ExcludedCountries/BlackoutDates: see Spec's own doc —
+	// threaded into every routesearch.Params/DateRangeParams/
+	// FlexibleParams literal dispatch.runSearch builds.
+	MaxCountries      int
+	ExcludedCountries []string
+	BlackoutDates     []string
 }
 
 // CollectRouteResult is the structured result a dispatched search returns —

@@ -56,8 +56,31 @@ type Spec struct {
 	// of a round trip prices From-to-To-squared combinations, so
 	// coarser sampling (e.g. every 3 days) can matter a lot more here
 	// than it did for the older single-window case.
-	StepDays        int
-	SoftConstraints []string
+	StepDays int
+	// MinTripLengthDays/MaxTripLengthDays (round_trip only): a trip-length
+	// tolerance range, coupled to MinDepartDate/MaxDepartDate — an
+	// alternative to MinReturnDate/MaxReturnDate's own independent range,
+	// for "N days, give or take" rather than "back sometime in this other
+	// window" (routesearch.FlexibleParams' TripLengthDays/TripLengthMaxDays,
+	// N queries instead of the independent ranges' N×M grid). Mutually
+	// exclusive with MinReturnDate/MaxReturnDate — set one shape or the
+	// other, never both; validateDates resolves a contradiction the same
+	// way it already resolves a backwards return window.
+	MinTripLengthDays  int
+	MaxTripLengthDays  int
+	TripLengthStepDays int
+	// MaxCountries/ExcludedCountries/BlackoutDates: hop-country and
+	// blackout-date pruning, already enforced by routesearch itself
+	// (Params.ExcludedCountries/MaxCountries, FlexibleParams/
+	// DateRangeParams' BlackoutDates) but previously unreachable from
+	// plain text — a "avoid Russia as a layover" or "not around
+	// Christmas" had no path into either mechanism until these fields
+	// existed on Spec for FormSpec to fill and dispatch.runSearch to
+	// thread through.
+	MaxCountries      int
+	ExcludedCountries []string
+	BlackoutDates     []string
+	SoftConstraints   []string
 	// Notes carries forward *why* FormSpec left a field blank or unresolved
 	// (e.g. "Beijing has multiple airports (PEK/PKX), none specified") —
 	// info that would otherwise vanish once FormSpec returns just the
@@ -109,6 +132,8 @@ func (s Spec) toCollectRouteRequest() CollectRouteRequest {
 		MinLayoverMinutes: s.MinLayoverMinutes, MaxLayoverMinutes: s.MaxLayoverMinutes,
 		CheckedBags:    s.CheckedBags,
 		SearchRadiusKm: s.SearchRadiusKm, StepDays: s.StepDays,
+		MinTripLengthDays: s.MinTripLengthDays, MaxTripLengthDays: s.MaxTripLengthDays, TripLengthStepDays: s.TripLengthStepDays,
+		MaxCountries: s.MaxCountries, ExcludedCountries: s.ExcludedCountries, BlackoutDates: s.BlackoutDates,
 	}
 }
 
