@@ -24,16 +24,36 @@ type DateScanEntry struct {
 	Excluded string `json:"excluded,omitempty"`
 }
 
-// FlexibleParams is a flexible-date request: a target date (Base.
-// DepartDate is the scan window's center) plus how wide/coarse to
-// scan around it.
+// FlexibleParams is a flexible-date request: a depart-date window plus
+// how wide/coarse to scan it, and — for a round trip — a trip-length
+// tolerance coupled to each depart date rather than a full depart×return
+// grid (see DateRangeParams for that independent-ranges alternative).
 type FlexibleParams struct {
-	Base           Params // Origin/Destination/MaxHours/QueryBudget/etc — DepartDate is the window's center
-	RoundTrip      bool
-	TripLengthDays int  // only used if RoundTrip: return = depart + TripLengthDays, coupled (not a full depart×return grid)
-	WindowDays     int  // scan [center-WindowDays, center+WindowDays]
-	StepDays       int  // sample every StepDays within the window; 1 = every day
-	ScanOnly       bool // stop after Phase A (the date scan); skip Phase B's hub search
+	Base      Params // Origin/Destination/MaxHours/QueryBudget/etc — DepartDate is the window's center, only when DepartFrom/DepartTo are unset
+	RoundTrip bool
+	// TripLengthDays: return = depart + TripLengthDays, coupled (not a
+	// full depart×return grid). TripLengthMaxDays makes this a tolerance
+	// range instead of one fixed length: every length from TripLengthDays
+	// through TripLengthMaxDays is tried, sampled every TripLengthStepDays
+	// (0 defaults to 1, every day) — TripLengthMaxDays 0 (or < TripLengthDays)
+	// means "just TripLengthDays," today's single-fixed-length behavior,
+	// unchanged.
+	TripLengthDays     int
+	TripLengthMaxDays  int
+	TripLengthStepDays int
+	// WindowDays/StepDays: the depart-date window, scanned
+	// [center-WindowDays, center+WindowDays] every StepDays — only used
+	// when DepartFrom/DepartTo (below) are both unset.
+	WindowDays int
+	StepDays   int
+	// DepartFrom/DepartTo: an explicit depart-date window, as an
+	// alternative to Base.DepartDate (window center) + WindowDays above —
+	// set one shape or the other; DepartFrom/DepartTo wins if either is
+	// set, since naming an explicit window is more specific than a center
+	// point.
+	DepartFrom string
+	DepartTo   string
+	ScanOnly   bool // stop after Phase A (the date scan); skip Phase B's hub search
 
 	// Eligibility constraints on which scanned date can actually be
 	// picked as the winner — deliberately separate from WindowDays/
@@ -72,30 +92,42 @@ func SearchFlexible(ctx context.Context, deps Deps, p FlexibleParams) (*Flexible
 	plan := &FlexiblePlan{RequestID: requestID, Input: p, Status: "running"}
 	_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
 
-	center, err := time.Parse("2006-01-02", p.Base.DepartDate)
+	departDates, err := p.departDates()
 	if err != nil {
-		plan.Status = fmt.Sprintf("error: invalid depart date: %v", err)
+		plan.Status = fmt.Sprintf("error: %v", err)
+		_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
 		return plan, fmt.Errorf("routesearch: %s", plan.Status)
 	}
-	step := p.StepDays
-	if step < 1 {
-		step = 1
-	}
+	tripLengths := p.tripLengths()
 
 	elig := eligibility{AvailableFrom: p.AvailableFrom, AvailableUntil: p.AvailableUntil, ExcludeWeekdays: p.ExcludeWeekdays, BlackoutDates: p.BlackoutDates}
-	log.Info("phase A: date scan", "window_days", p.WindowDays, "step_days", step, "round_trip", p.RoundTrip)
-	for offset := -p.WindowDays; offset <= p.WindowDays; offset += step {
-		entry, live := scanOneDate(ctx, deps, p, center, offset)
-		entry.Excluded = exclusionReason(elig, entry)
-		plan.DateScan = append(plan.DateScan, entry)
-		log.Info("date scan point", "depart", entry.DepartDate, "return", entry.ReturnDate,
-			"price_usd", entry.PriceUSD, "reason", entry.Reason, "live", live)
-		// Only pace a real scrape — a cache hit costs Google nothing, so
-		// waiting p.Base.Delay anyway made a fully-cached rerun look just
-		// as slow as the first live run, masking that the cache worked.
-		if live {
-			sleepPacing(ctx, p.Base.Delay)
+	queriesUsed := 0
+	budgetExhausted := false
+	log.Info("phase A: date scan", "departs", len(departDates), "trip_lengths", len(tripLengths), "round_trip", p.RoundTrip)
+outer:
+	for _, depart := range departDates {
+		for _, tripLen := range tripLengths {
+			if !withinBudget(queriesUsed, p.Base.QueryBudget) {
+				budgetExhausted = true
+				break outer
+			}
+			entry, live := scanOneDateAt(ctx, deps, p, depart, tripLen)
+			entry.Excluded = exclusionReason(elig, entry)
+			plan.DateScan = append(plan.DateScan, entry)
+			log.Info("date scan point", "depart", entry.DepartDate, "return", entry.ReturnDate,
+				"price_usd", entry.PriceUSD, "reason", entry.Reason, "live", live)
+			// Only pace/count a real scrape — a cache hit costs Google
+			// nothing, so waiting p.Base.Delay anyway made a fully-cached
+			// rerun look just as slow as the first live run, masking that
+			// the cache worked.
+			if live {
+				queriesUsed++
+				sleepPacing(ctx, p.Base.Delay)
+			}
 		}
+	}
+	if budgetExhausted {
+		log.Warn("date scan truncated: query budget exhausted before every combination was priced", "priced", len(plan.DateScan), "query_budget", p.Base.QueryBudget)
 	}
 
 	best := cheapestDateScanEntry(plan.DateScan)
@@ -150,17 +182,73 @@ func SearchFlexible(ctx context.Context, deps Deps, p FlexibleParams) (*Flexible
 	return plan, nil
 }
 
-// scanOneDate is one Phase-A query for the coupled (fixed trip length,
-// flexible start) case: cheapest-by-price only, no hub search — the
-// whole point of this phase is staying cheap per date so a wide window
-// is affordable. Thin wrapper around scanPair, which SearchDateRange
-// (daterange.go) also uses for the independent-ranges case.
-func scanOneDate(ctx context.Context, deps Deps, p FlexibleParams, center time.Time, offsetDays int) (DateScanEntry, bool) {
-	depart := center.AddDate(0, 0, offsetDays).Format("2006-01-02")
+// departDates resolves FlexibleParams' depart-date window into a plain
+// list: the explicit DepartFrom/DepartTo window when either is set,
+// otherwise Base.DepartDate (the center) +/- WindowDays — see
+// FlexibleParams' doc for why one shape wins over the other.
+func (p FlexibleParams) departDates() ([]string, error) {
+	step := p.StepDays
+	if step < 1 {
+		step = 1
+	}
+	if p.DepartFrom != "" || p.DepartTo != "" {
+		dates, err := dateRange(p.DepartFrom, p.DepartTo, step)
+		if err != nil {
+			return nil, fmt.Errorf("invalid depart window: %w", err)
+		}
+		return dates, nil
+	}
+	center, err := time.Parse("2006-01-02", p.Base.DepartDate)
+	if err != nil {
+		return nil, fmt.Errorf("invalid depart date: %w", err)
+	}
+	var out []string
+	for offset := -p.WindowDays; offset <= p.WindowDays; offset += step {
+		out = append(out, center.AddDate(0, 0, offset).Format("2006-01-02"))
+	}
+	return out, nil
+}
+
+// tripLengths resolves the round-trip length tolerance range into a
+// plain list of day counts: TripLengthDays through TripLengthMaxDays
+// (defaulting to just TripLengthDays, today's single fixed length,
+// unchanged), sampled every TripLengthStepDays (0 defaults to 1). A
+// one-way search has no trip length at all — a single zero-value
+// placeholder so its caller's loop still runs exactly once.
+func (p FlexibleParams) tripLengths() []int {
+	if !p.RoundTrip {
+		return []int{0}
+	}
+	max := p.TripLengthMaxDays
+	if max < p.TripLengthDays {
+		max = p.TripLengthDays
+	}
+	step := p.TripLengthStepDays
+	if step < 1 {
+		step = 1
+	}
+	var out []int
+	for n := p.TripLengthDays; n <= max; n += step {
+		out = append(out, n)
+	}
+	return out
+}
+
+// scanOneDateAt is one Phase-A query for a given depart date and
+// (round-trip only) trip length: cheapest-by-price only, no hub search —
+// the whole point of this phase is staying cheap per combination so a
+// wide window is affordable. Thin wrapper around scanPair, which
+// SearchDateRange (daterange.go) also uses for the independent-ranges
+// case.
+func scanOneDateAt(ctx context.Context, deps Deps, p FlexibleParams, depart string, tripLenDays int) (DateScanEntry, bool) {
 	if !p.RoundTrip {
 		return scanPair(ctx, deps, p.Base, depart, "")
 	}
-	ret := center.AddDate(0, 0, offsetDays+p.TripLengthDays).Format("2006-01-02")
+	d, err := time.Parse("2006-01-02", depart)
+	if err != nil {
+		return DateScanEntry{DepartDate: depart, Reason: err.Error()}, false
+	}
+	ret := d.AddDate(0, 0, tripLenDays).Format("2006-01-02")
 	return scanPair(ctx, deps, p.Base, depart, ret)
 }
 
