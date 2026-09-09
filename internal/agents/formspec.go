@@ -45,6 +45,11 @@ Spec's fields, and when to set each:
   A round trip's return must never be resolved to land on or before the departure window — if straightforward date arithmetic would do that (e.g. a "next <month>" miscount), the intended year is next year instead.
   MinRoundTripDate, MaxRoundTripDate (round_trip only): a hard outer bound both the departure and return date must fall within — set this ONLY from an explicit, absolute constraint on the whole trip's length or deadline (e.g. "I only have a month of paid leave", "I must be back by end of January no matter what", "the whole trip can't be more than 3 weeks"), never from an ordinary vague date phrase (that's MinDepartDate/MaxDepartDate's or MinReturnDate/MaxReturnDate's own job above). If enough is already known to compute real dates (e.g. MinDepartDate is set and the text says "one month"), set MinRoundTripDate/MaxRoundTripDate to actual YYYY-MM-DD values; if not enough is known yet, leave both "" and add a Note describing the constraint so the next step can ask what's missing. This exists so an absolute limit (limited leave, a hard deadline) is never silently violated by treating a wide departure/return window as if any combination within it were acceptable.
   StepDays: sample every StepDays within a date range above; 0 (the default) means every day. Only raise this from an explicit request for coarser sampling ("check every few days") — never as a way to narrow a range you're unsure about; leaving a range wide with StepDays 0 is always safer than guessing a narrower one.
+  MinTripLengthDays, MaxTripLengthDays (round_trip only): a trip-length tolerance — "about a week", "10-14 days", "two weeks give or take a few days" — as an ALTERNATIVE to MinReturnDate/MaxReturnDate, never both: set this pair ONLY when the text describes the trip's *duration* rather than naming (even vaguely) a *return time period*. A duration alone with no depart window yet isn't enough to compute real dates — leave both "" and add a Note if MinDepartDate/MaxDepartDate aren't both resolved yet; once they are, set MinTripLengthDays/MaxTripLengthDays to the actual day counts described (a single length like "a week" sets both to 7, i.e. no tolerance). If the text instead names or implies a return time period (any of MinReturnDate's own trigger phrases above), that's MinReturnDate/MaxReturnDate's job, not this one.
+  TripLengthStepDays: sample every TripLengthStepDays within the trip-length tolerance range above; 0 (the default) means every day. Same "only raise from an explicit ask" rule as StepDays.
+  MaxCountries: cap on how many distinct countries a connecting itinerary may transit, 0 = no cap. Only set this from an explicit count the text actually states (e.g. "no more than 2 countries along the way").
+  ExcludedCountries: country names (as commonly spelled in English) a layover/connection must never be in — e.g. "avoid Russia as a layover", "nothing through China". Append new ones to whatever's already there; never drop an existing entry.
+  BlackoutDates: YYYY-MM-DD dates a chosen depart or return date must never land on — e.g. "not around Christmas" resolves to the specific date(s) implied (Dec 24-25), "avoid New Year's Day" resolves to Jan 1 of the relevant year. Resolve a named holiday/occasion to its actual date(s) the same way MinDepartDate's vague-phrase rule resolves "end of year" to a range. Append new ones to whatever's already there; never drop an existing entry.
   MaxHours: max tolerable total elapsed trip time, in hours. Default 30 if the text doesn't say.
   QueryBudget: how many hub candidates the search may try. Default 20 if the text doesn't say.
   MaxPrice: hard USD price ceiling, 0 = none. Only set this from an explicit price/budget the text actually states.
@@ -55,7 +60,7 @@ Spec's fields, and when to set each:
   Notes: a plain-language list, one entry per field you left genuinely blank *for a specific reason* the next step needs in order to ask a sharp follow-up instead of a generic one (e.g. an unresolved date range, or a place name that isn't a recognizable city or airport at all). A named multi-airport city is NOT one of these — that goes in Origin/Destination as the city name, per above, not a blank field with a note. Unlike SoftConstraints, Notes is not permanent: once the new text resolves what a note was about, drop that note — keep only notes still unresolved.
 
 Reply with EXACTLY one JSON object, no prose outside it, no markdown fences — Intention and Info as their own nested objects, each with its own Reasoning:
-{"Intention": {"Type": "new_request"|"additional_info"|"rewrite"|"question_about_result", "Reasoning": "one sentence on why this text reads as that intention"}, "Info": {"Spec": {"Origin": "...", "Destination": "...", "TripType": "one_way"|"round_trip"|"", "MinDepartDate": "...", "MaxDepartDate": "...", "MinReturnDate": "...", "MaxReturnDate": "...", "MinRoundTripDate": "...", "MaxRoundTripDate": "...", "StepDays": 0, "MaxHours": 30, "QueryBudget": 20, "MaxPrice": 0, "MinLayoverMinutes": 120, "MaxLayoverMinutes": 720, "CheckedBags": 0, "SearchRadiusKm": 100, "SoftConstraints": ["..."], "Notes": ["..."]}, "Reasoning": "one sentence on what you filled in, changed, or left blank and why"}}`
+{"Intention": {"Type": "new_request"|"additional_info"|"rewrite"|"question_about_result", "Reasoning": "one sentence on why this text reads as that intention"}, "Info": {"Spec": {"Origin": "...", "Destination": "...", "TripType": "one_way"|"round_trip"|"", "MinDepartDate": "...", "MaxDepartDate": "...", "MinReturnDate": "...", "MaxReturnDate": "...", "MinRoundTripDate": "...", "MaxRoundTripDate": "...", "StepDays": 0, "MinTripLengthDays": 0, "MaxTripLengthDays": 0, "TripLengthStepDays": 0, "MaxHours": 30, "QueryBudget": 20, "MaxPrice": 0, "MinLayoverMinutes": 120, "MaxLayoverMinutes": 720, "CheckedBags": 0, "SearchRadiusKm": 100, "MaxCountries": 0, "ExcludedCountries": ["..."], "BlackoutDates": ["..."], "SoftConstraints": ["..."], "Notes": ["..."]}, "Reasoning": "one sentence on what you filled in, changed, or left blank and why"}}`
 
 // FormSpec turns existing (the spec so far — zero value for a new
 // request) plus text (the new email/CLI text to fold in) into an
@@ -114,6 +119,19 @@ func validateDates(s Spec) Spec {
 	if s.TripType == "round_trip" && s.MaxDepartDate != "" && s.MinReturnDate != "" && s.MinReturnDate <= s.MaxDepartDate {
 		s.MinReturnDate, s.MaxReturnDate = "", ""
 		s.Notes = append(s.Notes, fmt.Sprintf("return window resolved on or before the departure window (ends %s) — likely a year miscount on a relative date; needs to be asked again", s.MaxDepartDate))
+	}
+
+	// MinReturnDate/MaxReturnDate (an independent return window) and
+	// MinTripLengthDays/MaxTripLengthDays (a trip-length tolerance coupled
+	// to the depart window) are mutually exclusive ways of expressing the
+	// same "when do I come back" question — never both at once. The
+	// return-date range is kept as the more specific of the two (an
+	// explicit window beats a length inferred from one), same "mechanical
+	// backstop, not a judgment call" reasoning as the backwards-window
+	// check above.
+	if s.TripType == "round_trip" && s.MinReturnDate != "" && (s.MinTripLengthDays != 0 || s.MaxTripLengthDays != 0) {
+		s.MinTripLengthDays, s.MaxTripLengthDays, s.TripLengthStepDays = 0, 0, 0
+		s.Notes = append(s.Notes, "both a return-date range and a trip-length range were given for the same round trip — kept the return-date range, cleared the trip-length range as redundant")
 	}
 	return s
 }

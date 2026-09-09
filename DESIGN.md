@@ -1332,15 +1332,43 @@ disclose this too), and `QueryBudget` (unlimited by default) is the one
 explicit opt-in cap. Coarser sampling stays available, but only as an
 explicit request ("check every few days"), never a silent default.
 
-**Considered: a Google Flights bulk price-calendar/graph endpoint**,
-analogous to what `internal/googleflights/protobuf.go` already reverse-
-engineered for the single-date search — the only way to make a very wide
-window's exhaustive search fast too, since (unlike hop distance) there's
-no admissible price lower-bound for an unqueried date to prune on. Not
-committed: a time-boxed spike, not yet known whether such an endpoint is
-reachable the same way. Falls back to today's one-scrape-per-date `scanPair`
-loop if not found; the finding either way gets recorded here once done, so
-it's not re-investigated blind later.
+**Spiked, not adopted: a Google Flights bulk price-calendar/graph
+endpoint.** It exists — `GetCalendarGraph`
+(`https://www.google.com/_/FlightsFrontendUi/data/travel.frontend.flights.FlightsFrontendService/GetCalendarGraph`),
+confirmed via a real working client
+([krisukox/google-flights-api](https://github.com/krisukox/google-flights-api)'s
+`GetPriceGraph`) — one request returns every (start date, return date,
+price) triple for a start-date range at one fixed trip length, which
+would turn a wide window's N `scanPair` scrapes into one call. Not worth
+adopting here, for two reasons found in that client's source, not
+theoretical:
+  - **It's a stateful RPC, not a stateless query string.** Unlike our
+    protobuf `tfs` param (one deterministic GET, no cookies), this
+    endpoint needs a prior page load to harvest session cookies and a
+    time-stamped anti-abuse token (`at=...`) sent with every call — real
+    session-lifecycle code our `Client` (one `http.Client`, no state
+    between calls) doesn't have anywhere today, for every call site
+    (`cmd/routesearch`, `cmd/collector -worker`, `cmd/email-intake`,
+    Kafka-dispatched agent tasks) to now share and keep alive.
+  - **The request body pins a dated internal build id**
+    (`bl=boq_travel-frontend-ui_20230627.07_p1` in the reference
+    client, already ~3 years stale) inside a bespoke nested-array
+    ("batchexecute"-style) payload — a second, differently-fragile
+    reverse-engineered format alongside the protobuf one, needing its
+    own independent upkeep as Google's frontend build rolls forward,
+    for a fixed trip length per call rather than the full independent
+    depart×return grid `SearchDateRange` supports (it would still need
+    one call per trip length, or per return-range point, to cover that
+    case).
+  - Given "resolved: every fuzzy dimension is enumerated exhaustively by
+    default" above already accepts N (or N×M) real scrapes as the
+    honest cost, and this project's low request volume ("Collection
+    scope") doesn't make that cost pressing, the added client-lifecycle
+    complexity and a second fragile reverse-engineered surface aren't
+    worth it for this project's stated risk tolerance. `scanPair`'s
+    one-scrape-per-date loop stays the implementation; revisit if a
+    live wide-range search's latency ever actually becomes the
+    bottleneck (unlikely at today's "days-SLA async" volume).
 
 **Resolved: hop-country and blackout-date pruning reach the agent loop,
 not just `cmd/routesearch`.** `routesearch.Params.ExcludedCountries`/

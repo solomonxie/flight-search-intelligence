@@ -92,10 +92,28 @@ func runSearch(ctx context.Context, deps routesearch.Deps, req agents.CollectRou
 		return agents.CollectRouteResult{}, fmt.Errorf("dispatch: resolving destination %q: %w", req.Destination, err)
 	}
 
-	roundTrip := req.TripType == "round_trip" && req.MinReturnDate != ""
-	flexible := req.MinDepartDate != req.MaxDepartDate || (roundTrip && req.MinReturnDate != req.MaxReturnDate)
+	// roundTrip: TripType says round_trip AND a return is actually
+	// resolved one of two mutually-exclusive ways — an independent
+	// MinReturnDate, or a MinTripLengthDays/MaxTripLengthDays tolerance
+	// coupled to the depart window (see agents.Spec.MinTripLengthDays'
+	// doc) — never neither, missingRequiredFields already guarantees one
+	// of the two is set before dispatch is reached.
+	roundTrip := req.TripType == "round_trip" && (req.MinReturnDate != "" || req.MinTripLengthDays != 0 || req.MaxTripLengthDays != 0)
+	// tripLengthFlex: the coupled-length shape specifically — routed to
+	// routesearch.SearchFlexible (N depart-window queries x trip-length
+	// tolerance), not the independent-ranges grid below (N x M queries),
+	// since the whole point of offering this shape is the cheaper query
+	// count when the trip length is actually fixed-ish rather than a
+	// genuinely independent return window.
+	tripLengthFlex := roundTrip && req.MinReturnDate == ""
+	// independentRangeFlex: a genuine range on either end, priced via
+	// routesearch.SearchDateRange's full depart x return grid.
+	independentRangeFlex := !tripLengthFlex && (req.MinDepartDate != req.MaxDepartDate || (roundTrip && req.MinReturnDate != req.MaxReturnDate))
 
-	if flexible {
+	if tripLengthFlex {
+		return runFlexibleTripLengthSearch(ctx, deps, req, origins, destinations)
+	}
+	if independentRangeFlex {
 		return runDateRangeSearch(ctx, deps, req, origins, destinations, roundTrip)
 	}
 	if roundTrip {
@@ -107,18 +125,9 @@ func runSearch(ctx context.Context, deps routesearch.Deps, req agents.CollectRou
 	var lastErr error
 	for _, o := range origins {
 		for _, d := range destinations {
-			plan, err := routesearch.Search(ctx, deps, routesearch.Params{
-				Origin:            o,
-				Destination:       d,
-				DepartDate:        req.MinDepartDate,
-				MaxHours:          req.MaxHours,
-				QueryBudget:       req.QueryBudget,
-				MaxPrice:          req.MaxPrice,
-				MinLayoverMinutes: req.MinLayoverMinutes,
-				MaxLayoverMinutes: req.MaxLayoverMinutes,
-				CheckedBags:       req.CheckedBags,
-				PricePerMile:      0.08,
-			})
+			params := baseParams(req, o, d)
+			params.DepartDate = req.MinDepartDate
+			plan, err := routesearch.Search(ctx, deps, params)
 			if err != nil {
 				lastErr = err // one candidate airport failing shouldn't sink every other candidate
 				continue
@@ -157,18 +166,9 @@ func runRoundTripSearch(ctx context.Context, deps routesearch.Deps, req agents.C
 	var lastErr error
 	for _, o := range origins {
 		for _, d := range destinations {
-			plan, err := routesearch.SearchRoundTrip(ctx, deps, routesearch.Params{
-				Origin:            o,
-				Destination:       d,
-				DepartDate:        req.MinDepartDate,
-				MaxHours:          req.MaxHours,
-				QueryBudget:       req.QueryBudget,
-				MaxPrice:          req.MaxPrice,
-				MinLayoverMinutes: req.MinLayoverMinutes,
-				MaxLayoverMinutes: req.MaxLayoverMinutes,
-				CheckedBags:       req.CheckedBags,
-				PricePerMile:      0.08,
-			}, req.MinReturnDate)
+			params := baseParams(req, o, d)
+			params.DepartDate = req.MinDepartDate
+			plan, err := routesearch.SearchRoundTrip(ctx, deps, params, req.MinReturnDate)
 			if err != nil {
 				lastErr = err // one candidate airport pair failing shouldn't sink every other candidate
 				continue
@@ -209,32 +209,64 @@ func runRoundTripSearch(ctx context.Context, deps routesearch.Deps, req agents.C
 // best result, so "cheapest across pairs" is the natural way to compare
 // them.
 func runDateRangeSearch(ctx context.Context, deps routesearch.Deps, req agents.CollectRouteRequest, origins, destinations []string, roundTrip bool) (agents.CollectRouteResult, error) {
+	return runFlexibleAcrossCandidates(origins, destinations, func(o, d string) (*routesearch.FlexiblePlan, error) {
+		return routesearch.SearchDateRange(ctx, deps, routesearch.DateRangeParams{
+			Base:           baseParams(req, o, d),
+			RoundTrip:      roundTrip,
+			DepartFrom:     req.MinDepartDate,
+			DepartTo:       req.MaxDepartDate,
+			ReturnFrom:     req.MinReturnDate,
+			ReturnTo:       req.MaxReturnDate,
+			StepDays:       req.StepDays,
+			AvailableFrom:  req.MinRoundTripDate,
+			AvailableUntil: req.MaxRoundTripDate,
+			BlackoutDates:  req.BlackoutDates,
+		})
+	})
+}
+
+// runFlexibleTripLengthSearch is runSearch's tripLengthFlex branch: the
+// coupled depart-window x trip-length-tolerance shape
+// (routesearch.SearchFlexible), an alternative to runDateRangeSearch's
+// independent depart x return grid whenever the request actually has a
+// trip length in mind rather than a genuinely separate return window
+// (see agents.Spec.MinTripLengthDays' doc for why that's cheaper: N
+// queries instead of N x M).
+func runFlexibleTripLengthSearch(ctx context.Context, deps routesearch.Deps, req agents.CollectRouteRequest, origins, destinations []string) (agents.CollectRouteResult, error) {
+	return runFlexibleAcrossCandidates(origins, destinations, func(o, d string) (*routesearch.FlexiblePlan, error) {
+		return routesearch.SearchFlexible(ctx, deps, routesearch.FlexibleParams{
+			Base:               baseParams(req, o, d),
+			RoundTrip:          true,
+			DepartFrom:         req.MinDepartDate,
+			DepartTo:           req.MaxDepartDate,
+			StepDays:           req.StepDays,
+			TripLengthDays:     req.MinTripLengthDays,
+			TripLengthMaxDays:  req.MaxTripLengthDays,
+			TripLengthStepDays: req.TripLengthStepDays,
+			AvailableFrom:      req.MinRoundTripDate,
+			AvailableUntil:     req.MaxRoundTripDate,
+			BlackoutDates:      req.BlackoutDates,
+		})
+	})
+}
+
+// runFlexibleAcrossCandidates is runDateRangeSearch and
+// runFlexibleTripLengthSearch's shared "try every origin/destination
+// candidate pair, keep the cheapest FlexiblePlan" loop, factored out
+// since both reduce each pair to one chosen date (or date + trip length)
+// and one best result — "cheapest across pairs" is the natural way to
+// compare them, same as round-trip's own single-pair reduction. search
+// is the one thing that differs between the two callers: which
+// routesearch entry point (SearchDateRange vs. SearchFlexible) actually
+// runs for a given (origin, destination) pair.
+func runFlexibleAcrossCandidates(origins, destinations []string, search func(origin, destination string) (*routesearch.FlexiblePlan, error)) (agents.CollectRouteResult, error) {
 	out := agents.CollectRouteResult{}
 	var best *routesearch.FlexiblePlan
 	var bestPrice float64
 	var lastErr error
 	for _, o := range origins {
 		for _, d := range destinations {
-			plan, err := routesearch.SearchDateRange(ctx, deps, routesearch.DateRangeParams{
-				Base: routesearch.Params{
-					Origin: o, Destination: d,
-					MaxHours:          req.MaxHours,
-					QueryBudget:       req.QueryBudget,
-					MaxPrice:          req.MaxPrice,
-					MinLayoverMinutes: req.MinLayoverMinutes,
-					MaxLayoverMinutes: req.MaxLayoverMinutes,
-					CheckedBags:       req.CheckedBags,
-					PricePerMile:      0.08,
-				},
-				RoundTrip:      roundTrip,
-				DepartFrom:     req.MinDepartDate,
-				DepartTo:       req.MaxDepartDate,
-				ReturnFrom:     req.MinReturnDate,
-				ReturnTo:       req.MaxReturnDate,
-				StepDays:       req.StepDays,
-				AvailableFrom:  req.MinRoundTripDate,
-				AvailableUntil: req.MaxRoundTripDate,
-			})
+			plan, err := search(o, d)
 			if err != nil {
 				lastErr = err // one candidate airport pair failing shouldn't sink every other candidate
 				continue
@@ -286,6 +318,27 @@ func runDateRangeSearch(ctx context.Context, deps routesearch.Deps, req agents.C
 		}
 	}
 	return out, nil
+}
+
+// baseParams is the routesearch.Params common to every dispatch shape
+// (exact one-way, exact round trip, date-range grid, trip-length flex)
+// for one origin/destination candidate pair — DepartDate is set by
+// whichever caller needs it (the flexible shapes leave it blank; their
+// own DepartFrom/DepartTo carries the window instead).
+func baseParams(req agents.CollectRouteRequest, origin, destination string) routesearch.Params {
+	return routesearch.Params{
+		Origin:            origin,
+		Destination:       destination,
+		MaxHours:          req.MaxHours,
+		QueryBudget:       req.QueryBudget,
+		MaxPrice:          req.MaxPrice,
+		MinLayoverMinutes: req.MinLayoverMinutes,
+		MaxLayoverMinutes: req.MaxLayoverMinutes,
+		CheckedBags:       req.CheckedBags,
+		MaxCountries:      req.MaxCountries,
+		ExcludedCountries: req.ExcludedCountries,
+		PricePerMile:      0.08,
+	}
 }
 
 // flexiblePlanPrice is the figure to compare candidate airport pairs
