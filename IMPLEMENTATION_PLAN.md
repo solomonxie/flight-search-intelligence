@@ -241,56 +241,72 @@ trip, wide-open window" backlog item below with the actual requirement
 Phase 2 (`Spec`/`FormSpec`/`dispatch.runSearch`) and Phase 3
 (`ExcludedCountries`/`MaxCountries`).
 
-- [ ] `routesearch.FlexibleParams`: `TripLengthDays` becomes a tolerance
+- [x] `routesearch.FlexibleParams`: `TripLengthDays` becomes a tolerance
       range (`TripLengthMaxDays`, `TripLengthStepDays` — 0 defaults to
       1, every day, never an error); add explicit `DepartFrom`/`DepartTo`
-      as an alternative to center date + `WindowDays`
-- [ ] Fix: `SearchFlexible`'s Phase A has no `QueryBudget` check at all
+      as an alternative to center date + `WindowDays` — `27c866b`
+- [x] Fix: `SearchFlexible`'s Phase A has no `QueryBudget` check at all
       today (unlike `SearchDateRange`) — add the same
-      `withinBudget`/`queriesUsed` guard
-- [ ] `routesearch.DateRangeParams`: add `BlackoutDates`, threaded into
-      its `eligibility{...}` the same way `FlexibleParams` already does
-- [ ] Pre-flight cost estimate for the new shapes: extend
-      `cmd/routesearch/confirm.go`'s pattern; extend `DecideNextAction`'s
-      existing "disclose default assumptions on first `ask_user`" to also
-      disclose a wide fuzzy range's estimated query count/time
-- [ ] Time-boxed spike: a Google Flights bulk price-calendar/graph
+      `withinBudget`/`queriesUsed` guard — `27c866b`
+- [x] `routesearch.DateRangeParams`: add `BlackoutDates`, threaded into
+      its `eligibility{...}` the same way `FlexibleParams` already does —
+      `27c866b`
+- [x] Pre-flight cost estimate for the new shapes: extend
+      `cmd/routesearch/confirm.go`'s pattern (`FlexibleParams.
+      EstimatedCombinations`, `-depart-from`/`-depart-to`/
+      `-trip-length-max-days`/`-trip-length-step-days` flags — `61214d9`);
+      extend `DecideNextAction`'s existing "disclose default assumptions
+      on first `ask_user`" to also mechanically disclose a wide fuzzy
+      range's estimated combination count — `ed61243`
+- [x] Time-boxed spike: a Google Flights bulk price-calendar/graph
       endpoint (same reverse-engineering approach as
-      `internal/googleflights/protobuf.go`) — record the finding in
-      DESIGN.md either way; wire in as Phase A's preferred path over
-      per-date `scanPair` only if found workable
-- [ ] `agents.Spec`/`CollectRouteRequest`: add `MinTripLengthDays`/
+      `internal/googleflights/protobuf.go`) — found (`GetCalendarGraph`,
+      confirmed via krisukox/google-flights-api's `GetPriceGraph`), not
+      adopted: needs session cookies + a time-stamped anti-abuse token
+      (this project's client is stateless today) and a second,
+      independently-fragile reverse-engineered payload format pinned to
+      a dated internal build id. Recorded in DESIGN.md; `scanPair`'s
+      one-scrape-per-date loop stays the implementation — `ed61243`
+- [x] `agents.Spec`/`CollectRouteRequest`: add `MinTripLengthDays`/
       `MaxTripLengthDays`/`TripLengthStepDays`, `ExcludedCountries`,
       `MaxCountries`, `BlackoutDates`; forward in
-      `Spec.toCollectRouteRequest`
-- [ ] `FormSpec`'s prompt: teach all six new fields, incl. trip-length
+      `Spec.toCollectRouteRequest` — `ed61243`
+- [x] `FormSpec`'s prompt: teach all six new fields, incl. trip-length
       tolerance as an alternative to `MinReturnDate`/`MaxReturnDate`
       (mutually exclusive — `validateDates` resolves a contradiction the
-      same way it already resolves a backwards return window)
-- [ ] `decide.go`: round-trip's required-field check accepts a trip-length
+      same way it already resolves a backwards return window) — `ed61243`
+- [x] `decide.go`: round-trip's required-field check accepts a trip-length
       range as an alternative to `MinReturnDate`; add new fields to
       `decideSystemPrompt`'s dispatch-argument contract and
-      `fillDispatchDefaults`
-- [ ] `dispatch.runSearch`: new `tripLengthFlex` branch →
-      `runFlexibleTripLengthSearch` (factor the origin/destination
-      candidate-merge loop `runDateRangeSearch` already has into one
-      shared helper); thread `ExcludedCountries`/`MaxCountries`/
-      `BlackoutDates` into every `Params`/`DateRangeParams`/
-      `FlexibleParams` literal in the file, not just the new shape
-- [ ] `catalog.GetRouteSearchPlan` (read-side counterpart to
-      `SaveRouteSearchPlan`); a `WriteTraceFile` helper (mirrors
+      `fillDispatchDefaults` — `ed61243`
+- [x] `dispatch.runSearch`: new `tripLengthFlex` branch →
+      `runFlexibleTripLengthSearch` (factored the origin/destination
+      candidate-merge loop `runDateRangeSearch` already had into the
+      shared `runFlexibleAcrossCandidates`); thread
+      `ExcludedCountries`/`MaxCountries`/`BlackoutDates` into every
+      `Params`/`DateRangeParams`/`FlexibleParams` literal in the file via
+      the new `baseParams` helper, not just the new shape — `ed61243`
+- [x] `catalog.GetRouteSearchPlan` (read-side counterpart to
+      `SaveRouteSearchPlan`); `internal/tracefile.Write` (mirrors
       `cmd/collector/main.go`'s `writeRaw` idiom); every routesearch
-      entry point writes its `Plan`/`FlexiblePlan` to a trace file
-      alongside the existing DB save; the agent loop's finalize step
-      writes one combined file joining `agents.Outcome`'s conversation
-      trail with each round's fetched `RouteSearchPlan`
-- [ ] `internal/ratelimit`: `Limiter` interface + `FixedWindow`
-      (multi-granularity, mutex-guarded) implementation; wire into
-      `googleflights.Client`'s one HTTP call site, one shared instance
-      per process across all four `NewClient()` call sites
-- [ ] Tests: `flexible_test.go` (new), `daterange_test.go` extension,
-      `dispatch/search_test.go` new cases, `formspec_test.go` extension,
-      a trace-file test, `ratelimit_test.go` (incl. `-race`)
+      entry point's `savePlan` helper writes its `Plan`/`FlexiblePlan` to
+      a trace file alongside the existing DB save (once final, not on
+      the initial "running" checkpoint); the agent loop's finalize step
+      (`agents.writeCombinedTraceFile`) writes one combined file joining
+      the conversation trail with each round's fetched
+      `RouteSearchPlan` — `b8bab80`
+- [x] `internal/ratelimit`: `Limiter` interface + `FixedWindow`
+      (multi-granularity, mutex-guarded) implementation; wired into
+      `googleflights.Client`'s one HTTP call site, one shared
+      `processSharedLimiter` instance across all four `NewClient()` call
+      sites — `d376415`
+- [ ] Tests: `flexible_test.go` (new — `27c866b`, covers the tolerance
+      range/explicit window/budget guard) and a `daterange_test.go`
+      `BlackoutDates` case (`27c866b`) are done; still open:
+      `dispatch/search_test.go` new cases (tripLengthFlex,
+      hop-country/blackout threading), `formspec_test.go`/`decide_test.go`
+      coverage for the six new Spec fields and the disclosure logic, a
+      trace-file test, `ratelimit_test.go` (incl. `-race`)
 
 ## Backlog — proposed, not yet a DESIGN.md decision
 
