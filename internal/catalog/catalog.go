@@ -197,3 +197,17 @@ func (s *SQLite) SaveRouteSearchPlan(ctx context.Context, id, status string, pla
 	}
 	return nil
 }
+
+// GetRouteSearchPlan is SaveRouteSearchPlan's read-side counterpart — a
+// combined trace file (see DESIGN.md "Wide fuzzy-range search...") reads
+// each round's saved plan back out of the store to join into one file,
+// rather than duplicating what routesearch already wrote here. Returns
+// an error wrapping sql.ErrNoRows if id doesn't exist.
+func (s *SQLite) GetRouteSearchPlan(ctx context.Context, id string) (planJSON []byte, status string, err error) {
+	var raw string
+	row := s.db.QueryRowContext(ctx, `SELECT status, plan_json FROM route_search_plans WHERE id = ?`, id)
+	if err := row.Scan(&status, &raw); err != nil {
+		return nil, "", fmt.Errorf("catalog: getting route search plan %q: %w", id, err)
+	}
+	return []byte(raw), status, nil
+}

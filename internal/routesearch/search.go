@@ -27,15 +27,13 @@ func Search(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 	log := deps.Logger.With("request_id", requestID)
 	plan := &Plan{RequestID: requestID, Input: p, Status: "running"}
 
-	if err := deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan)); err != nil {
-		log.Warn("saving initial plan failed", "error", err)
-	}
+	savePlan(ctx, deps, requestID, plan.Status, plan)
 
 	_, ok1 := deps.Graph.Airport(p.Origin)
 	_, ok2 := deps.Graph.Airport(p.Destination)
 	if !ok1 || !ok2 {
 		plan.Status = fmt.Sprintf("error: unknown airport (origin ok=%v, destination ok=%v)", ok1, ok2)
-		_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
+		savePlan(ctx, deps, requestID, plan.Status, plan)
 		return plan, fmt.Errorf("routesearch: %s", plan.Status)
 	}
 
@@ -84,7 +82,7 @@ func Search(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 	preview, err := ResolveCandidates(ctx, deps, p)
 	if err != nil {
 		plan.Status = fmt.Sprintf("error: %v", err)
-		_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
+		savePlan(ctx, deps, requestID, plan.Status, plan)
 		return plan, err
 	}
 	plan.CandidatesConsidered = preview.CandidatesConsidered
@@ -194,9 +192,7 @@ func Search(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 
 	plan.QueriesUsed = queriesUsed
 	plan.Status = "done"
-	if err := deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan)); err != nil {
-		log.Warn("saving final plan failed", "error", err)
-	}
+	savePlan(ctx, deps, requestID, plan.Status, plan)
 	log.Info("search done", "queries_used", queriesUsed, "results", len(plan.FinalResult))
 	return plan, nil
 }

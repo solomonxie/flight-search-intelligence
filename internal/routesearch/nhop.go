@@ -71,19 +71,17 @@ func searchNHop(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 	requestID := fmt.Sprintf("%s-%s-%s-%d", p.Origin, p.Destination, p.DepartDate, time.Now().UnixNano())
 	log := deps.Logger.With("request_id", requestID)
 	plan := &Plan{RequestID: requestID, Input: p, Status: "running"}
-	if err := deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan)); err != nil {
-		log.Warn("saving initial plan failed", "error", err)
-	}
+	savePlan(ctx, deps, requestID, plan.Status, plan)
 
 	if _, ok := deps.Graph.Airport(p.Origin); !ok {
 		plan.Status = "error: unknown origin airport"
-		_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
+		savePlan(ctx, deps, requestID, plan.Status, plan)
 		return plan, fmt.Errorf("routesearch: %s", plan.Status)
 	}
 	destination, ok := deps.Graph.Airport(p.Destination)
 	if !ok {
 		plan.Status = "error: unknown destination airport"
-		_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
+		savePlan(ctx, deps, requestID, plan.Status, plan)
 		return plan, fmt.Errorf("routesearch: %s", plan.Status)
 	}
 
@@ -195,7 +193,7 @@ func searchNHop(ctx context.Context, deps Deps, p Params) (*Plan, error) {
 
 	plan.Status = "done"
 	plan.QueriesUsed = queriesUsed
-	_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
+	savePlan(ctx, deps, requestID, plan.Status, plan)
 	log.Info("nhop: search done", "queries_used", queriesUsed, "results", len(plan.FinalResult))
 	return plan, nil
 }
