@@ -90,12 +90,12 @@ func SearchFlexible(ctx context.Context, deps Deps, p FlexibleParams) (*Flexible
 	requestID := fmt.Sprintf("FLEX-%s-%s-%d", p.Base.Origin, p.Base.Destination, time.Now().UnixNano())
 	log := deps.Logger.With("request_id", requestID)
 	plan := &FlexiblePlan{RequestID: requestID, Input: p, Status: "running"}
-	_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
+	savePlan(ctx, deps, requestID, plan.Status, plan)
 
 	departDates, err := p.departDates()
 	if err != nil {
 		plan.Status = fmt.Sprintf("error: %v", err)
-		_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
+		savePlan(ctx, deps, requestID, plan.Status, plan)
 		return plan, fmt.Errorf("routesearch: %s", plan.Status)
 	}
 	tripLengths := p.tripLengths()
@@ -137,7 +137,7 @@ outer:
 			reason = "every priced date is excluded by AvailableFrom/AvailableUntil/ExcludeWeekdays/BlackoutDates"
 		}
 		plan.Status = "error: " + reason
-		_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
+		savePlan(ctx, deps, requestID, plan.Status, plan)
 		return plan, fmt.Errorf("routesearch: %s", plan.Status)
 	}
 	plan.ChosenDepartDate = best.DepartDate
@@ -146,7 +146,7 @@ outer:
 
 	if p.ScanOnly {
 		plan.Status = "done (scan only, phase B skipped)"
-		_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
+		savePlan(ctx, deps, requestID, plan.Status, plan)
 		log.Info("scan-only: skipping phase B")
 		return plan, nil
 	}
@@ -158,7 +158,7 @@ outer:
 		rtPlan, err := SearchRoundTrip(ctx, deps, anchored, best.ReturnDate)
 		if err != nil {
 			plan.Status = fmt.Sprintf("error: phase B: %v", err)
-			_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
+			savePlan(ctx, deps, requestID, plan.Status, plan)
 			return plan, err
 		}
 		plan.AnchoredPlanID = rtPlan.RequestID
@@ -167,7 +167,7 @@ outer:
 		owPlan, err := Search(ctx, deps, anchored)
 		if err != nil {
 			plan.Status = fmt.Sprintf("error: phase B: %v", err)
-			_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
+			savePlan(ctx, deps, requestID, plan.Status, plan)
 			return plan, err
 		}
 		plan.AnchoredPlanID = owPlan.RequestID
@@ -177,7 +177,7 @@ outer:
 	}
 
 	plan.Status = "done"
-	_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
+	savePlan(ctx, deps, requestID, plan.Status, plan)
 	log.Info("flexible search done")
 	return plan, nil
 }
@@ -232,6 +232,22 @@ func (p FlexibleParams) tripLengths() []int {
 		out = append(out, n)
 	}
 	return out
+}
+
+// EstimatedCombinations is the worst-case number of Phase A price checks
+// this request implies — depart dates x trip lengths — the pre-flight
+// cost estimate cmd/routesearch's confirmation prompt (and the agent
+// loop's own ask_user disclosure, see agents.decideSystemPrompt) shows
+// before spending a single real scrape. Returns 0 if the depart window
+// itself fails to resolve (e.g. an invalid date) — the caller's own
+// SearchFlexible call surfaces that error properly; this is
+// display-estimate only.
+func (p FlexibleParams) EstimatedCombinations() int {
+	departDates, err := p.departDates()
+	if err != nil {
+		return 0
+	}
+	return len(departDates) * len(p.tripLengths())
 }
 
 // scanOneDateAt is one Phase-A query for a given depart date and
