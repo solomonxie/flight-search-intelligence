@@ -42,6 +42,10 @@ type DateRangeParams struct {
 	// combinations may be picked as the winner. Same semantics as
 	// FlexibleParams' own eligibility fields (see eligibility, above).
 	AvailableFrom, AvailableUntil string
+	// BlackoutDates: a depart or return date matching one of these is
+	// ineligible to win, same as FlexibleParams' own BlackoutDates (e.g.
+	// "not around Christmas") — still priced and shown, just excluded.
+	BlackoutDates []string
 }
 
 // SearchDateRange runs the grid: Phase A prices every (depart, return)
@@ -71,7 +75,7 @@ func SearchDateRange(ctx context.Context, deps Deps, p DateRangeParams) (*Flexib
 		return plan, err
 	}
 
-	elig := eligibility{AvailableFrom: p.AvailableFrom, AvailableUntil: p.AvailableUntil}
+	elig := eligibility{AvailableFrom: p.AvailableFrom, AvailableUntil: p.AvailableUntil, BlackoutDates: p.BlackoutDates}
 	queriesUsed := 0
 	budgetExhausted := false
 
@@ -126,7 +130,7 @@ func SearchDateRange(ctx context.Context, deps Deps, p DateRangeParams) (*Flexib
 	if best == nil {
 		reason := "no feasible date combination in range"
 		if anyPricedButExcluded(plan.DateScan) {
-			reason = "every priced combination is excluded by AvailableFrom/AvailableUntil"
+			reason = "every priced combination is excluded by AvailableFrom/AvailableUntil/BlackoutDates"
 		}
 		plan.Status = "error: " + reason
 		_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))

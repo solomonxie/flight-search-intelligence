@@ -101,3 +101,38 @@ func TestSearchDateRange_EligibilityExcludesCheaperIneligibleCombo(t *testing.T)
 		t.Fatal("never saw a DateScan entry for 2026-12-10/2027-01-10 at all")
 	}
 }
+
+// TestSearchDateRange_BlackoutDatesExcludeCheaperCombo is
+// BlackoutDates' own version of the eligibility test above: a cheaper
+// combination landing on a blackout date must lose to a pricier eligible
+// one, not win outright.
+func TestSearchDateRange_BlackoutDatesExcludeCheaperCombo(t *testing.T) {
+	transport := &indexedPriceTransport{price: func(i int) int {
+		if i == 0 {
+			return 50 // cheapest overall — but departs on a blackout date
+		}
+		return 500
+	}}
+	deps := testDeps(t, transport)
+
+	plan, err := SearchDateRange(context.Background(), deps, DateRangeParams{
+		Base: Params{
+			Origin: "YVR", Destination: "PEK",
+			MaxHours: 1e6, QueryBudget: 50, MinLayoverMinutes: 0, MaxLayoverMinutes: 1e7,
+			PricePerMile: 0.08,
+		},
+		DepartFrom:    "2026-12-24",
+		DepartTo:      "2026-12-26",
+		StepDays:      1,
+		BlackoutDates: []string{"2026-12-24"},
+	})
+	if err != nil {
+		t.Fatalf("SearchDateRange: %v", err)
+	}
+	if plan.ChosenDepartDate == "2026-12-24" {
+		t.Errorf("ChosenDepartDate = %s, want a date other than the blacked-out 2026-12-24", plan.ChosenDepartDate)
+	}
+	if plan.ChosenDepartDate == "" {
+		t.Error("ChosenDepartDate is blank — every eligible combination should still have priced fine")
+	}
+}
