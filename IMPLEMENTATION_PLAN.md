@@ -232,36 +232,14 @@ surface.
       payload per bag count) and that a full `Search()` run picks up the
       new cache key correctly
 
-## Phase 5: Infra — provisioning the agent-loop stack for production
-
-DESIGN.md "Infra" (top-level architecture) and "Schema ownership"
-target section. Shape is already decided (Terraform EC2 + Ansible-
-installed self-managed Kubernetes + Helm), just unbuilt — `terraform/`
-is still an empty placeholder and `ansible/` only has the `mac_dev`
-dev-machine role today. Depends on nothing above functionally (it's
-deployment, not logic), placed last because there's nothing worth
-deploying continuously until Phases 1-4 give the loop real judgment.
-
-- [ ] `terraform/`: EC2 instances + networking for the Kubernetes fleet
-- [ ] `ansible/`: a new role to install/join self-managed Kubernetes on
-      that fleet (separate from `mac_dev`, which configures a
-      developer's own Mac, not the fleet)
-- [ ] Docker image per component (`email-intake`, `agent-worker`,
-      `collector`, `search-api`, serving-sync) — one per existing
-      `cmd/` binary
-- [ ] Helm chart per component, plus the Postgres Flyway pre-install/
-      pre-upgrade hook Job described under "Schema ownership"
-- [ ] Strimzi Kafka and Postgres as self-managed workloads on the same
-      cluster
-
-## Phase 6: Wide fuzzy-range search, preference-aware pruning, trace files, a shared rate limiter
+## Phase 5: Wide fuzzy-range search, preference-aware pruning, trace files, a shared rate limiter
 
 DESIGN.md "Wide fuzzy-range search, preference-aware pruning, a trace
 file, and a shared rate limiter" — supersedes the old "Fixed-length
 trip, wide-open window" backlog item below with the actual requirement
 (any width, on any fuzzy dimension), not one example of it. Depends on
 Phase 2 (`Spec`/`FormSpec`/`dispatch.runSearch`) and Phase 3
-(`ExcludedCountries`/`MaxCountries`); independent of Phase 5.
+(`ExcludedCountries`/`MaxCountries`).
 
 - [ ] `routesearch.FlexibleParams`: `TripLengthDays` becomes a tolerance
       range (`TripLengthMaxDays`, `TripLengthStepDays` — 0 defaults to
@@ -319,6 +297,26 @@ Phase 2 (`Spec`/`FormSpec`/`dispatch.runSearch`) and Phase 3
 Not a phase: no DESIGN.md section has decided these yet, so there's
 nothing dependency-ordered to schedule until one exists.
 
+- [ ] **Infra — provisioning the agent-loop stack for production.**
+      DESIGN.md "Infra" (top-level architecture) and "Schema ownership"
+      target section — the only backlog item whose shape a DESIGN.md
+      section *has* already decided (Terraform EC2 + Ansible-installed
+      self-managed Kubernetes + Helm); deprioritized rather than
+      undecided, moved here since there's nothing worth deploying
+      continuously yet. `terraform/` is still an empty placeholder and
+      `ansible/` only has the `mac_dev` dev-machine role today.
+  - [ ] `terraform/`: EC2 instances + networking for the Kubernetes
+        fleet
+  - [ ] `ansible/`: a new role to install/join self-managed Kubernetes
+        on that fleet (separate from `mac_dev`, which configures a
+        developer's own Mac, not the fleet)
+  - [ ] Docker image per component (`email-intake`, `agent-worker`,
+        `collector`, `search-api`, serving-sync) — one per existing
+        `cmd/` binary
+  - [ ] Helm chart per component, plus the Postgres Flyway pre-install/
+        pre-upgrade hook Job described under "Schema ownership"
+  - [ ] Strimzi Kafka and Postgres as self-managed workloads on the
+        same cluster
 - [ ] Multi-airport origin/destination (e.g. treat PEK/PKX/NAY as
       interchangeable, price each, keep the cheapest) — needs a
       DESIGN.md write-up and an explicit decision first, not started
@@ -326,5 +324,5 @@ nothing dependency-ordered to schedule until one exists.
       inputs — same "query input, not a scoring adjustment" shape as
       Phase 4's baggage, but no DESIGN.md write-up exists yet
 - Fixed-length trip, wide-open window as its own agent-loop request
-  shape — superseded by Phase 6 above (generalized to any width, on any
+  shape — superseded by Phase 5 above (generalized to any width, on any
   fuzzy dimension, not just this one example), not a backlog item anymore
