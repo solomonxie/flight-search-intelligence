@@ -68,7 +68,11 @@ func run() error {
 
 	dateWindowDays := flag.Int("date-window-days", 0, "flexible-date scan: +/- this many days around -date (0 disables flexible dates)")
 	dateStepDays := flag.Int("date-step-days", 1, "flexible-date scan: sample every N days within the window")
+	departFrom := flag.String("depart-from", "", "flexible-date scan: explicit depart window start, YYYY-MM-DD — alternative to -date + -date-window-days")
+	departTo := flag.String("depart-to", "", "flexible-date scan: explicit depart window end, YYYY-MM-DD")
 	tripLengthDays := flag.Int("trip-length-days", 0, "flexible round trip: fixed trip length; defaults to (-return-date minus -date) if both given")
+	tripLengthMaxDays := flag.Int("trip-length-max-days", 0, "flexible round trip: trip-length tolerance — try every length from -trip-length-days through this one; 0 means just -trip-length-days")
+	tripLengthStepDays := flag.Int("trip-length-step-days", 1, "flexible round trip: sample every N days within the trip-length tolerance range")
 	dryRun := flag.Bool("dry-run", false, "resolve airports + rank candidate hubs only, no scraping (step 1 of the algorithm; overrides every other mode below)")
 	scanDates := flag.Bool("scan-dates", false, "with -date-window-days, check the fare for each date in the window and stop — no connecting-hub search")
 	availableFrom := flag.String("available-from", "", "flexible-date scan: reject a chosen date whose depart/return falls before this YYYY-MM-DD (e.g. limited PTO)")
@@ -139,7 +143,7 @@ func run() error {
 	stdin := bufio.NewReader(os.Stdin)
 
 	switch {
-	case *dateWindowDays > 0:
+	case *dateWindowDays > 0 || (*departFrom != "" && *departTo != ""):
 		tripLen := *tripLengthDays
 		if *returnDate != "" && tripLen == 0 {
 			d1, err1 := time.Parse("2006-01-02", *date)
@@ -154,12 +158,22 @@ func run() error {
 			return err
 		}
 
+		flexParams := routesearch.FlexibleParams{
+			Base: base, RoundTrip: *returnDate != "",
+			TripLengthDays: tripLen, TripLengthMaxDays: *tripLengthMaxDays, TripLengthStepDays: *tripLengthStepDays,
+			WindowDays: *dateWindowDays, StepDays: *dateStepDays,
+			DepartFrom: *departFrom, DepartTo: *departTo,
+			ScanOnly:      *scanDates,
+			AvailableFrom: *availableFrom, AvailableUntil: *availableUntil,
+			ExcludeWeekdays: weekdays, BlackoutDates: splitNonEmpty(*blackoutDates),
+		}
+
 		if !skipConfirm {
-			gridCount := 0
-			for offset := -*dateWindowDays; offset <= *dateWindowDays; offset += *dateStepDays {
-				gridCount++
-			}
+			gridCount := flexParams.EstimatedCombinations()
 			describe := fmt.Sprintf("%s -> %s, %s +/- %d days", *origin, *destination, *date, *dateWindowDays)
+			if *departFrom != "" {
+				describe = fmt.Sprintf("%s -> %s, %s..%s", *origin, *destination, *departFrom, *departTo)
+			}
 			candidateHubs, maxQueries := 0, gridCount
 			if !*scanDates {
 				var err error
@@ -178,12 +192,7 @@ func run() error {
 			}
 		}
 
-		plan, err := routesearch.SearchFlexible(ctx, deps, routesearch.FlexibleParams{
-			Base: base, RoundTrip: *returnDate != "", TripLengthDays: tripLen,
-			WindowDays: *dateWindowDays, StepDays: *dateStepDays, ScanOnly: *scanDates,
-			AvailableFrom: *availableFrom, AvailableUntil: *availableUntil,
-			ExcludeWeekdays: weekdays, BlackoutDates: splitNonEmpty(*blackoutDates),
-		})
+		plan, err := routesearch.SearchFlexible(ctx, deps, flexParams)
 		if err != nil {
 			return err
 		}
