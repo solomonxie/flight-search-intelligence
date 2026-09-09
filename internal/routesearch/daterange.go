@@ -62,7 +62,7 @@ func SearchDateRange(ctx context.Context, deps Deps, p DateRangeParams) (*Flexib
 	requestID := fmt.Sprintf("GRID-%s-%s-%d", p.Base.Origin, p.Base.Destination, time.Now().UnixNano())
 	log := deps.Logger.With("request_id", requestID)
 	plan := &FlexiblePlan{RequestID: requestID, Status: "running"}
-	_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
+	savePlan(ctx, deps, requestID, plan.Status, plan)
 
 	step := p.StepDays
 	if step < 1 {
@@ -71,7 +71,7 @@ func SearchDateRange(ctx context.Context, deps Deps, p DateRangeParams) (*Flexib
 	departDates, err := dateRange(p.DepartFrom, p.DepartTo, step)
 	if err != nil {
 		plan.Status = fmt.Sprintf("error: %v", err)
-		_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
+		savePlan(ctx, deps, requestID, plan.Status, plan)
 		return plan, err
 	}
 
@@ -98,7 +98,7 @@ func SearchDateRange(ctx context.Context, deps Deps, p DateRangeParams) (*Flexib
 		returnDates, err := dateRange(p.ReturnFrom, p.ReturnTo, step)
 		if err != nil {
 			plan.Status = fmt.Sprintf("error: %v", err)
-			_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
+			savePlan(ctx, deps, requestID, plan.Status, plan)
 			return plan, err
 		}
 		log.Info("phase A: date-range grid scan (round trip)", "departures", len(departDates), "returns", len(returnDates), "combinations", len(departDates)*len(returnDates))
@@ -133,7 +133,7 @@ func SearchDateRange(ctx context.Context, deps Deps, p DateRangeParams) (*Flexib
 			reason = "every priced combination is excluded by AvailableFrom/AvailableUntil/BlackoutDates"
 		}
 		plan.Status = "error: " + reason
-		_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
+		savePlan(ctx, deps, requestID, plan.Status, plan)
 		return plan, fmt.Errorf("routesearch: %s", plan.Status)
 	}
 	plan.ChosenDepartDate = best.DepartDate
@@ -147,7 +147,7 @@ func SearchDateRange(ctx context.Context, deps Deps, p DateRangeParams) (*Flexib
 		rtPlan, err := SearchRoundTrip(ctx, deps, anchored, best.ReturnDate)
 		if err != nil {
 			plan.Status = fmt.Sprintf("error: phase B: %v", err)
-			_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
+			savePlan(ctx, deps, requestID, plan.Status, plan)
 			return plan, err
 		}
 		plan.AnchoredPlanID = rtPlan.RequestID
@@ -156,7 +156,7 @@ func SearchDateRange(ctx context.Context, deps Deps, p DateRangeParams) (*Flexib
 		owPlan, err := Search(ctx, deps, anchored)
 		if err != nil {
 			plan.Status = fmt.Sprintf("error: phase B: %v", err)
-			_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
+			savePlan(ctx, deps, requestID, plan.Status, plan)
 			return plan, err
 		}
 		plan.AnchoredPlanID = owPlan.RequestID
@@ -166,7 +166,7 @@ func SearchDateRange(ctx context.Context, deps Deps, p DateRangeParams) (*Flexib
 	}
 
 	plan.Status = "done"
-	_ = deps.Catalog.SaveRouteSearchPlan(ctx, requestID, plan.Status, mustJSON(plan))
+	savePlan(ctx, deps, requestID, plan.Status, plan)
 	log.Info("date-range search done", "queries_used", queriesUsed)
 	return plan, nil
 }
