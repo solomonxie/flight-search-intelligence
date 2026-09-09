@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // decideSystemPrompt is DESIGN.md "Agent loop" steps 2 and 4-5: choose
@@ -27,7 +28,7 @@ Never choose "defer" — it exists in the type system but isn't wired to anythin
 
 Judge each round's result against BOTH halves of the spec: concrete fields are already enforced by the search itself (never re-check those — a result violating MaxHours/MaxPrice simply won't appear), but SoftConstraints are plain language only you can judge — e.g. "no self-transfer / separate tickets" is violated by any result with SelfTransfer:true (round-trip results: check OutboundSelfTransfer and ReturnSelfTransfer, either can be true independent of the other). A result violating a soft constraint is NOT "good enough," even if it's the only or cheapest option found: dispatch again with adjusted arguments instead of finalizing, unless you're genuinely out of ideas for how to adjust — then finalize, and say plainly in Reasoning that a soft constraint went unmet.
 
-For "dispatch", "Request" must be a JSON object with these fields (Go field names, exactly): Origin, Destination, TripType ("one_way" or "round_trip" — must already be resolved, never ""), MinDepartDate, MaxDepartDate, MinReturnDate, MaxReturnDate (YYYY-MM-DD; Return* only set when TripType is "round_trip"), MinRoundTripDate, MaxRoundTripDate (YYYY-MM-DD, only if Spec has them — an absolute outer bound, e.g. limited leave), StepDays (int), MaxHours (float), QueryBudget (int), MaxPrice (int USD, 0 = no cap), MinLayoverMinutes, MaxLayoverMinutes (int minutes), CheckedBags (int, 0 = not mentioned), SearchRadiusKm (float; only matters when Origin/Destination is a city name, not a specific airport). Copy every one of these straight from the top-level Spec's own same-named field — never invent or narrow a date range yourself, that judgment call already happened in FormSpec; a From/To pair where From < To is a real range to search, not a mistake to collapse.
+For "dispatch", "Request" must be a JSON object with these fields (Go field names, exactly): Origin, Destination, TripType ("one_way" or "round_trip" — must already be resolved, never ""), MinDepartDate, MaxDepartDate, MinReturnDate, MaxReturnDate (YYYY-MM-DD; Return* only set when TripType is "round_trip"), MinRoundTripDate, MaxRoundTripDate (YYYY-MM-DD, only if Spec has them — an absolute outer bound, e.g. limited leave), StepDays (int), MinTripLengthDays, MaxTripLengthDays, TripLengthStepDays (int; round_trip only, an alternative to MinReturnDate/MaxReturnDate — Spec only ever has one of the two pairs set, copy whichever it has), MaxHours (float), QueryBudget (int), MaxPrice (int USD, 0 = no cap), MinLayoverMinutes, MaxLayoverMinutes (int minutes), CheckedBags (int, 0 = not mentioned), SearchRadiusKm (float; only matters when Origin/Destination is a city name, not a specific airport), MaxCountries (int, 0 = no cap), ExcludedCountries (list of country names), BlackoutDates (list of YYYY-MM-DD dates). Copy every one of these straight from the top-level Spec's own same-named field — never invent or narrow a date range yourself, that judgment call already happened in FormSpec; a From/To pair where From < To is a real range to search, not a mistake to collapse.
 
 Reply with EXACTLY one JSON object, no prose outside it, no markdown fences:
 {"Action": "dispatch"|"ask_user"|"finalize", "Request": {...only for dispatch...}, "Question": "...only for ask_user...", "Reasoning": "one or two sentences, always present"}`
@@ -92,7 +93,21 @@ func DecideNextAction(ctx context.Context, llm LLMClient, spec Spec, rounds []Ro
 		if decision, ok := overrideBogusStop(spec, rounds, round, "ask_user"); ok {
 			return decision, nil
 		}
-		decision := Decision{Action: ActionAskUser, Question: reply.Question, Reasoning: reply.Reasoning}
+		question := reply.Question
+		// Disclose a wide fuzzy range's cost on the same first-round-only
+		// terms decideSystemPrompt already tells the model to disclose its
+		// own defaults on (see the prompt's "FIRST ask_user round only"
+		// instruction) — computed mechanically here rather than trusted to
+		// the model, same reasoning as validateDates: a live run already
+		// showed date arithmetic isn't reliable coming out of the LLM, and
+		// silently under- or over-stating a combination count would be
+		// worse than not disclosing it at all.
+		if isFirstAskUser(rounds) {
+			if combos := estimateDateCombinations(spec); combos > wideRangeQueryThreshold {
+				question += fmt.Sprintf(" One more thing: the date range as given could mean checking around %d different date combinations, which may take a while — let me know if you'd like to narrow it (a shorter range, or checking every few days instead of every day) or if that's fine as-is.", combos)
+			}
+		}
+		decision := Decision{Action: ActionAskUser, Question: question, Reasoning: reply.Reasoning}
 		debugLog.Info("decided", "round", round, "action", decision.Action, "reasoning", decision.Reasoning)
 		return decision, nil
 	case ActionFinalize:
@@ -163,11 +178,88 @@ func missingRequiredFields(req CollectRouteRequest) []string {
 	case "":
 		missing = append(missing, "whether this is one-way or round-trip")
 	case "round_trip":
-		if req.MinReturnDate == "" {
+		// MinTripLengthDays is a legitimate alternative to MinReturnDate —
+		// see Spec.MinTripLengthDays's doc — so either one resolves this,
+		// not just an independent return-date range.
+		if req.MinReturnDate == "" && req.MinTripLengthDays == 0 {
 			missing = append(missing, "your return date")
 		}
 	}
 	return missing
+}
+
+// isFirstAskUser reports whether no round so far has already asked the
+// user something — decideSystemPrompt's default/cost disclosure is
+// meant for the first such round only ("don't repeat this on a later
+// round, it'd read as nagging").
+func isFirstAskUser(rounds []RoundRecord) bool {
+	for _, r := range rounds {
+		if r.Decision.Action == ActionAskUser {
+			return false
+		}
+	}
+	return true
+}
+
+// wideRangeQueryThreshold: a date-range combination count above this is
+// worth disclosing as "may take a while" — set just past
+// defaultQueryBudget (20), since that's already this codebase's own
+// notion of "a lot of scrapes for one request" (see FormSpec's
+// QueryBudget doc).
+const wideRangeQueryThreshold = 20
+
+// estimateDateCombinations mechanically estimates how many Phase A price
+// checks the current Spec's date range(s) imply — depart range size
+// alone for one-way or a fixed return date, depart x return for a
+// genuine independent round-trip range (the same grid
+// routesearch.SearchDateRange actually prices). Computed here rather
+// than asked of the model for the same reason validateDates is
+// mechanical: date arithmetic out of the LLM isn't reliable enough to
+// trust for a number quoted straight to the traveler.
+func estimateDateCombinations(s Spec) int {
+	departCount := dateSpanCount(s.MinDepartDate, s.MaxDepartDate, s.StepDays)
+	if s.TripType != "round_trip" {
+		return departCount
+	}
+	if s.MinReturnDate != "" {
+		return departCount * dateSpanCount(s.MinReturnDate, s.MaxReturnDate, s.StepDays)
+	}
+	if s.MinTripLengthDays != 0 || s.MaxTripLengthDays != 0 {
+		return departCount * tripLengthSpanCount(s.MinTripLengthDays, s.MaxTripLengthDays, s.TripLengthStepDays)
+	}
+	return departCount
+}
+
+// tripLengthSpanCount mirrors dateSpanCount for a trip-length tolerance
+// range (day counts, not calendar dates) — how many lengths sampling
+// every stepDays across [min, max] lands on.
+func tripLengthSpanCount(min, max, step int) int {
+	if max < min {
+		max = min
+	}
+	if step < 1 {
+		step = 1
+	}
+	return (max-min)/step + 1
+}
+
+// dateSpanCount is how many points sampling every stepDays across
+// [from, to] inclusive lands on — 1 if either bound is blank, unparsable,
+// or the range isn't actually forward (an exact date, not a range).
+func dateSpanCount(from, to string, stepDays int) int {
+	if from == "" || to == "" {
+		return 1
+	}
+	d1, err1 := time.Parse("2006-01-02", from)
+	d2, err2 := time.Parse("2006-01-02", to)
+	if err1 != nil || err2 != nil || !d2.After(d1) {
+		return 1
+	}
+	step := stepDays
+	if step < 1 {
+		step = 1
+	}
+	return int(d2.Sub(d1).Hours()/24)/step + 1
 }
 
 // joinMissing renders missing fields as "a", "a and b", or "a, b, and c" —
@@ -271,6 +363,24 @@ func fillDispatchDefaults(req CollectRouteRequest, spec Spec, rounds []RoundReco
 	}
 	if req.StepDays == 0 {
 		req.StepDays = fallback.StepDays
+	}
+	if req.MinTripLengthDays == 0 {
+		req.MinTripLengthDays = fallback.MinTripLengthDays
+	}
+	if req.MaxTripLengthDays == 0 {
+		req.MaxTripLengthDays = fallback.MaxTripLengthDays
+	}
+	if req.TripLengthStepDays == 0 {
+		req.TripLengthStepDays = fallback.TripLengthStepDays
+	}
+	if req.MaxCountries == 0 {
+		req.MaxCountries = fallback.MaxCountries
+	}
+	if len(req.ExcludedCountries) == 0 {
+		req.ExcludedCountries = fallback.ExcludedCountries
+	}
+	if len(req.BlackoutDates) == 0 {
+		req.BlackoutDates = fallback.BlackoutDates
 	}
 	return req
 }
