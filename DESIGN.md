@@ -1388,7 +1388,8 @@ call site, so it throttles every concurrent goroutine together rather
 than each independently. No token-bucket/leaky-bucket implementation for
 now; the `Limiter` interface leaves room for one, and for a Redis-backed
 implementation of the same interface once this goes distributed across
-the Phase 5 Kubernetes fleet, without touching any call site again.
+the (backlogged) Infra section's Kubernetes fleet, without touching any
+call site again.
 
 ## Open decisions
 
