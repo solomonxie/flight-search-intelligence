@@ -62,6 +62,27 @@ func TestValidateDates(t *testing.T) {
 			wantNote: false,
 		},
 	}
+	// A return-date range and a trip-length range are mutually exclusive
+	// (see Spec.MinTripLengthDays' doc) — validateDates keeps the more
+	// specific return-date range and clears the trip-length range,
+	// noting why.
+	t.Run("a return-date range and a trip-length range together clears the trip-length range", func(t *testing.T) {
+		got := validateDates(Spec{
+			TripType:          "round_trip",
+			MinDepartDate:     "2026-12-15", MaxDepartDate: "2026-12-15",
+			MinReturnDate:     "2026-12-22", MaxReturnDate: "2026-12-22",
+			MinTripLengthDays: 7, MaxTripLengthDays: 9, TripLengthStepDays: 2,
+		})
+		if got.MinReturnDate != "2026-12-22" || got.MaxReturnDate != "2026-12-22" {
+			t.Errorf("MinReturnDate/MaxReturnDate = %q/%q, want kept as-is", got.MinReturnDate, got.MaxReturnDate)
+		}
+		if got.MinTripLengthDays != 0 || got.MaxTripLengthDays != 0 || got.TripLengthStepDays != 0 {
+			t.Errorf("trip-length fields = %d/%d/%d, want all cleared to 0", got.MinTripLengthDays, got.MaxTripLengthDays, got.TripLengthStepDays)
+		}
+		if len(got.Notes) == 0 {
+			t.Error("Notes is empty, want a note explaining the trip-length range was cleared as redundant")
+		}
+	})
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got := validateDates(tt.in)

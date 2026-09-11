@@ -232,7 +232,7 @@ surface.
       payload per bag count) and that a full `Search()` run picks up the
       new cache key correctly
 
-## Phase 5: Wide fuzzy-range search, preference-aware pruning, trace files, a shared rate limiter
+## Phase 5: Wide fuzzy-range search, preference-aware pruning, trace files, a shared rate limiter — done
 
 DESIGN.md "Wide fuzzy-range search, preference-aware pruning, a trace
 file, and a shared rate limiter" — supersedes the old "Fixed-length
@@ -300,13 +300,22 @@ Phase 2 (`Spec`/`FormSpec`/`dispatch.runSearch`) and Phase 3
       `googleflights.Client`'s one HTTP call site, one shared
       `processSharedLimiter` instance across all four `NewClient()` call
       sites — `d376415`
-- [ ] Tests: `flexible_test.go` (new — `27c866b`, covers the tolerance
+- [x] Tests: `flexible_test.go` (new — `27c866b`, covers the tolerance
       range/explicit window/budget guard) and a `daterange_test.go`
-      `BlackoutDates` case (`27c866b`) are done; still open:
-      `dispatch/search_test.go` new cases (tripLengthFlex,
-      hop-country/blackout threading), `formspec_test.go`/`decide_test.go`
-      coverage for the six new Spec fields and the disclosure logic, a
-      trace-file test, `ratelimit_test.go` (incl. `-race`)
+      `BlackoutDates` case (`27c866b`) were already done;
+      `dispatch/search_test.go` new cases (`TestRunSearch_Flexible_TripLength`
+      for the tripLengthFlex branch, `TestBaseParams_ThreadsHopCountryAndBlackout`
+      and `TestRunDateRangeSearch_ThreadsBlackoutDates` for hop-country/
+      blackout threading); new `decide_test.go` covering
+      `missingRequiredFields`'s trip-length-as-return-date-alternative,
+      `fillDispatchDefaults`'s forward-fill of all six new fields,
+      `estimateDateCombinations`'s three shapes, `isFirstAskUser`,
+      `joinMissing`; `formspec_test.go`'s `TestValidateDates` gained the
+      return-date-vs-trip-length mutual-exclusivity case; new
+      `tracefile_test.go` (round-trip, dir creation, overwrite-not-append,
+      `Dir()` default) and `ratelimit_test.go` (window enforcement,
+      independent multi-window caps, context cancellation, and a
+      concurrent-goroutines case run under `-race`)
 
 ## Backlog — proposed, not yet a DESIGN.md decision
 

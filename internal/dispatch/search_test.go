@@ -120,6 +120,73 @@ func TestRunSearch_Flexible_RoundTrip(t *testing.T) {
 	}
 }
 
+// TestRunSearch_Flexible_TripLength is the tripLengthFlex branch:
+// MinTripLengthDays/MaxTripLengthDays set instead of MinReturnDate —
+// routed to runFlexibleTripLengthSearch (routesearch.SearchFlexible's
+// depart-window x trip-length-tolerance shape), not
+// runDateRangeSearch's independent depart x return grid (already
+// covered by TestRunSearch_Flexible_RoundTrip).
+func TestRunSearch_Flexible_TripLength(t *testing.T) {
+	deps := testDeps(t)
+	result, err := runSearch(context.Background(), deps, agents.CollectRouteRequest{
+		Origin: "YVR", Destination: "PEK", TripType: "round_trip",
+		MinDepartDate: "2026-12-14", MaxDepartDate: "2026-12-16",
+		MinTripLengthDays: 7, MaxTripLengthDays: 9,
+		MaxHours: 30, QueryBudget: 20, MinLayoverMinutes: 45, MaxLayoverMinutes: 720, SearchRadiusKm: 100,
+		StepDays: 1,
+	})
+	if err != nil {
+		t.Fatalf("runSearch: %v", err)
+	}
+	if result.ChosenDepartDate == "" || result.ChosenReturnDate == "" {
+		t.Errorf("ChosenDepartDate/ChosenReturnDate = %q/%q, want both set for a trip-length-flex search", result.ChosenDepartDate, result.ChosenReturnDate)
+	}
+	if len(result.Results) != 1 {
+		t.Fatalf("got %d results, want 1", len(result.Results))
+	}
+	if result.Results[0].TotalPriceUSD <= 0 {
+		t.Errorf("TotalPriceUSD = %v, want > 0", result.Results[0].TotalPriceUSD)
+	}
+}
+
+// TestBaseParams_ThreadsHopCountryAndBlackout is a regression test for
+// the Phase 5 gap baseParams was introduced to close: MaxCountries/
+// ExcludedCountries must reach every routesearch.Params literal
+// dispatch builds, not just the ones written after they were added.
+// BlackoutDates isn't part of routesearch.Params itself (it only
+// applies to a flexible search's eligibility check, DateRangeParams/
+// FlexibleParams's own field) — covered instead via runDateRangeSearch/
+// runFlexibleTripLengthSearch's construction below.
+func TestBaseParams_ThreadsHopCountryAndBlackout(t *testing.T) {
+	req := agents.CollectRouteRequest{
+		Origin: "YVR", Destination: "PEK",
+		MaxCountries:      2,
+		ExcludedCountries: []string{"Russia"},
+	}
+	params := baseParams(req, "YVR", "PEK")
+	if params.MaxCountries != 2 {
+		t.Errorf("MaxCountries = %d, want 2", params.MaxCountries)
+	}
+	if len(params.ExcludedCountries) != 1 || params.ExcludedCountries[0] != "Russia" {
+		t.Errorf("ExcludedCountries = %v, want [Russia]", params.ExcludedCountries)
+	}
+}
+
+func TestRunDateRangeSearch_ThreadsBlackoutDates(t *testing.T) {
+	deps := testDeps(t)
+	req := agents.CollectRouteRequest{
+		Origin: "YVR", Destination: "PEK", TripType: "one_way",
+		MinDepartDate: "2026-12-12", MaxDepartDate: "2026-12-13",
+		MaxHours: 30, QueryBudget: 10, MinLayoverMinutes: 45, MaxLayoverMinutes: 720, SearchRadiusKm: 100,
+		StepDays:      1,
+		BlackoutDates: []string{"2026-12-12", "2026-12-13"}, // every date in the window blacked out
+	}
+	_, err := runSearch(context.Background(), deps, req)
+	if err == nil {
+		t.Fatal("runSearch: got nil error, want a failure — every date in the window is blacked out, so no combination should ever be eligible")
+	}
+}
+
 // TestResolveAirports_CityFanoutIsBounded is a regression test: a city
 // name's radius fan-out used to return every airport OpenFlights knows
 // of within range, unfiltered — a live run had "Vancouver" resolve to
