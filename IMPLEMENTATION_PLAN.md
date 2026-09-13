@@ -375,3 +375,16 @@ nothing dependency-ordered to schedule until one exists.
 - Fixed-length trip, wide-open window as its own agent-loop request
   shape — superseded by Phase 5 above (generalized to any width, on any
   fuzzy dimension, not just this one example), not a backlog item anymore
+- [ ] **Agent-loop LLM-call reliability — no retry/backoff, raw errors
+      reach the user.** Found via a live `-interactive` conversation
+      test (see `.claude/skills/agent-conversation-test`):
+      `internal/agents/llm.go`'s `chatJSON` retries a reply that fails
+      to *parse*, but not a call that fails to complete at all — the
+      local Ollama backend died mid-conversation, and every
+      `FormSpec`/`DecideNextAction` call after that failed with a raw
+      Go error (`dial tcp ...: connection refused`) printed straight to
+      the traveler-facing REPL, permanently wedging that request with
+      no recovery in the same session. Needs a retry/backoff around
+      `LLMClient.Chat` itself, plus a user-facing message ("having
+      trouble right now, try again shortly") instead of the raw error.
+      Not safe to call this agent loop public-ready until it's in.
