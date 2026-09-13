@@ -17,6 +17,8 @@ makes the loop stop.
 
 - **`main.go`** — the only file, and the whole program: wait for a
   message, act on it, repeat.
+- **`Dockerfile`** — container image for the Helm Deployment in `helm/`
+  (DESIGN.md "Infra"); build from the repo root, not this directory.
 
 ## `collector/`
 
@@ -43,6 +45,8 @@ Files:
   one.
 - **`activities.go`** — the actual "go check flight prices" step one job
   runs: calls the search logic and saves a short summary of the result.
+- **`Dockerfile`** — container image; the Helm Deployment runs it in
+  `-worker` mode (default `CMD`), not the direct-run CLI mode.
 
 ## `email-intake/`
 
@@ -58,6 +62,8 @@ incoming email would trigger one action, not a persistent process.
   requirement to a request that's already in progress; no message needed
   for this one, since whatever runs next for that request reads the
   updated notes on its own).
+- **`Dockerfile`** — container image; the Helm chart runs it as a
+  Kubernetes Job, not a Deployment (this binary is one-shot).
 
 ## `routesearch/`
 
@@ -85,3 +91,5 @@ anything new." **Not built yet** — running it today just prints a
 placeholder message.
 
 - **`main.go`** — scaffold only.
+- **`Dockerfile`** — container image; builds and runs today (it just
+  doesn't serve anything real yet, per the scaffold above).
