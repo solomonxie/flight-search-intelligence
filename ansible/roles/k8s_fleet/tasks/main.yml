@@ -1,0 +1,8 @@
+---
+- name: Control-plane setup
+  ansible.builtin.include_tasks: control_plane.yml
+  when: inventory_hostname in groups['k8s_control_plane']
+
+- name: Worker setup
+  ansible.builtin.include_tasks: worker.yml
+  when: inventory_hostname in groups['k8s_workers']

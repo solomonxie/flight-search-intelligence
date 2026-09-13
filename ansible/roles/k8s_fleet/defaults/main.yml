@@ -1,0 +1,10 @@
+---
+# k3s per DESIGN.md "Open decisions" (lighter than kubeadm/RKE2 at this
+# project's scale). Pin a channel, not "latest", so a re-run doesn't
+# silently pick up a new k3s minor version.
+k3s_channel: stable
+
+# Single control-plane node (terraform/variables.tf's control_plane_count
+# default): no embedded-etcd HA, plain sqlite datastore. Flip once
+# control_plane_count > 1 in Terraform.
+k3s_ha: false

@@ -8,7 +8,9 @@
 resource "local_file" "ansible_inventory" {
   filename = "${path.module}/../ansible/inventories/aws/hosts.ini"
   content = templatefile("${path.module}/inventory.tpl", {
-    control_plane_ips = aws_instance.control_plane[*].public_ip
-    worker_ips        = aws_instance.worker[*].public_ip
+    control_plane_ips         = aws_instance.control_plane[*].public_ip
+    control_plane_private_ips = aws_instance.control_plane[*].private_ip
+    worker_ips                = aws_instance.worker[*].public_ip
+    worker_private_ips        = aws_instance.worker[*].private_ip
   })
 }
