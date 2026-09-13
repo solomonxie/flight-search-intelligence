@@ -1,0 +1,44 @@
+---
+- name: Ensure /etc/rancher/k3s exists
+  ansible.builtin.file:
+    path: /etc/rancher/k3s
+    state: directory
+    mode: "0755"
+  become: true
+
+- name: Deploy k3s server config
+  ansible.builtin.template:
+    src: k3s-server-config.yaml.j2
+    dest: /etc/rancher/k3s/config.yaml
+    mode: "0600"
+  become: true
+
+- name: Install k3s server
+  ansible.builtin.shell: |
+    curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL={{ k3s_channel }} sh -s - server
+  args:
+    creates: /etc/systemd/system/k3s.service
+  become: true
+
+- name: Wait for the join token to be written
+  ansible.builtin.wait_for:
+    path: /var/lib/rancher/k3s/server/node-token
+    timeout: 120
+  become: true
+
+- name: Read the join token
+  ansible.builtin.slurp:
+    src: /var/lib/rancher/k3s/server/node-token
+  become: true
+  register: _k3s_node_token_raw
+
+- name: Expose the join token as a fact — worker.yml reads it via hostvars
+  ansible.builtin.set_fact:
+    k3s_node_token: "{{ (_k3s_node_token_raw.content | b64decode).strip() }}"
+
+- name: Install Helm
+  ansible.builtin.shell: |
+    curl -sfL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+  args:
+    creates: /usr/local/bin/helm
+  become: true
