@@ -1,0 +1,17 @@
+# Shape of the real hosts.ini terraform/inventory.tf generates into this
+# same directory (gitignored — see terraform/README.md). Committed here
+# only so the shape is visible without having run `terraform apply`.
+
+[k8s_control_plane]
+203.0.113.10 ansible_host=203.0.113.10 k3s_advertise_ip=10.42.1.10
+
+[k8s_workers]
+203.0.113.11 ansible_host=203.0.113.11 k3s_advertise_ip=10.42.1.11
+203.0.113.12 ansible_host=203.0.113.12 k3s_advertise_ip=10.42.1.12
+
+[k8s_fleet:children]
+k8s_control_plane
+k8s_workers
+
+[k8s_fleet:vars]
+ansible_user=ubuntu

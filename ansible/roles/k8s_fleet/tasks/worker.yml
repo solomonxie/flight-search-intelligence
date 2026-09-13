@@ -1,0 +1,26 @@
+---
+# Depends on control_plane.yml having already run in this playbook run
+# (playbooks/k8s_fleet.yml sequences the two groups into separate plays
+# for exactly this reason) — k3s_node_token is a fact set there, read
+# here via hostvars.
+
+- name: Ensure /etc/rancher/k3s exists
+  ansible.builtin.file:
+    path: /etc/rancher/k3s
+    state: directory
+    mode: "0755"
+  become: true
+
+- name: Deploy k3s agent config
+  ansible.builtin.template:
+    src: k3s-agent-config.yaml.j2
+    dest: /etc/rancher/k3s/config.yaml
+    mode: "0600"
+  become: true
+
+- name: Install k3s agent
+  ansible.builtin.shell: |
+    curl -sfL https://get.k3s.io | INSTALL_K3S_CHANNEL={{ k3s_channel }} sh -s - agent
+  args:
+    creates: /etc/systemd/system/k3s-agent.service
+  become: true

@@ -1,0 +1,16 @@
+---
+# Run against terraform's generated inventory:
+#   ansible-playbook -i ../ansible/inventories/aws/hosts.ini k8s_fleet.yml
+#
+# Two plays, not one, on purpose: the control plane must finish (and
+# mint the join token k8s_fleet's worker.yml needs) before any worker
+# play runs — see roles/k8s_fleet/tasks/worker.yml's header comment.
+- name: Install/join k3s (control plane)
+  hosts: k8s_control_plane
+  roles:
+    - k8s_fleet
+
+- name: Install/join k3s (workers)
+  hosts: k8s_workers
+  roles:
+    - k8s_fleet

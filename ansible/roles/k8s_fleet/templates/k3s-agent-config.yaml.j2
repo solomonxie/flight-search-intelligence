@@ -1,0 +1,11 @@
+
+# k3s agent config, deployed whole — same reasoning as
+# k3s-server-config.yaml.j2's header comment.
+
+# join target: the control plane this role's control_plane.yml already
+# ran on, and the token it minted
+server: "https://{{ hostvars[groups['k8s_control_plane'][0]]['k3s_advertise_ip'] }}:6443"
+token: "{{ hostvars[groups['k8s_control_plane'][0]]['k3s_node_token'] }}"
+
+# network identity
+node-ip: "{{ k3s_advertise_ip }}"

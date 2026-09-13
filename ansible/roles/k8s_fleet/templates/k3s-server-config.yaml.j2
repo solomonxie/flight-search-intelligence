@@ -1,0 +1,19 @@
+
+# k3s server config, deployed whole rather than as scattered install-script
+# flags. No shipped upstream default exists before install (k3s writes
+# nothing here until it runs), so there's no .orig to keep alongside this
+# the way the ansible skill's config-file convention otherwise asks for.
+
+# network identity
+tls-san:
+  - "{{ k3s_advertise_ip }}"
+  - "{{ ansible_host }}"
+node-ip: "{{ k3s_advertise_ip }}"
+
+# access
+write-kubeconfig-mode: "0644"
+{% if k3s_ha %}
+
+# HA: embedded etcd instead of the single-node sqlite datastore
+cluster-init: true
+{% endif %}
