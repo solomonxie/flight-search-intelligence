@@ -1,0 +1,9 @@
+apiVersion: v2
+name: postgres
+description: >-
+  Self-managed Postgres (DESIGN.md "Infra" — deliberately not RDS).
+  Target prod serving store + agent-loop durable state; not yet
+  consumed by any app chart — see helm/README.md "Known gap".
+type: application
+version: 0.1.0
+appVersion: "16"

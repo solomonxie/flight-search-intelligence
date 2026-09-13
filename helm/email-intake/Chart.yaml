@@ -1,0 +1,8 @@
+apiVersion: v2
+name: email-intake
+description: >-
+  cmd/email-intake -start/-signal — one-shot stand-in for an SES-inbound
+  request/reply until that's built (DESIGN.md "Components"). Install
+  per invocation, not a standing release — see helm/README.md.
+type: application
+version: 0.1.0

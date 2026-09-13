@@ -1,0 +1,5 @@
+apiVersion: v2
+name: collector
+description: cmd/collector -worker — dispatched-search fetcher (DESIGN.md "Collector task dispatch")
+type: application
+version: 0.1.0

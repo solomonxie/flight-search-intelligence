@@ -1,0 +1,28 @@
+# Bootstrap service internal/kafka's consumers/producers connect to:
+# {{ .Values.clusterName }}-kafka-bootstrap:9092 (Strimzi's own naming
+# convention, not templated by us) — this is what agent-worker/
+# collector's KAFKA_BROKERS / -kafka-brokers values should point at.
+apiVersion: kafka.strimzi.io/v1beta2
+kind: Kafka
+metadata:
+  name: {{ .Values.clusterName }}
+  annotations:
+    strimzi.io/node-pools: enabled
+    strimzi.io/kraft: enabled
+spec:
+  kafka:
+    version: {{ .Values.kafkaVersion }}
+    listeners:
+      - name: plain
+        port: 9092
+        type: internal
+        tls: false
+    config:
+      offsets.topic.replication.factor: {{ .Values.replicas }}
+      transaction.state.log.replication.factor: {{ .Values.replicas }}
+      transaction.state.log.min.isr: 1
+      default.replication.factor: {{ .Values.replicas }}
+      min.insync.replicas: 1
+  entityOperator:
+    topicOperator: {}
+    userOperator: {}

@@ -1,0 +1,31 @@
+image:
+  repository: flight-search-intelligence/agent-worker
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# Stays at 1 while SQLite-backed (see helm/README.md "Known gap") — do
+# not scale this beyond 1 until internal/catalog has a Postgres backend.
+replicas: 1
+
+resources: {}
+
+sqliteData:
+  existingClaim: sqlite-data
+  mountPath: /app/data
+
+kafka:
+  bootstrapServers: kafka-kafka-bootstrap:9092
+
+# Must match whichever node helm/sqlite-data's PVC actually attaches to
+# — see helm/README.md "Known gap".
+nodeSelector:
+  sqlite-host: "true"
+
+llm:
+  backend: ollama # ollama | openai — internal/agents.NewLLMClientFromEnv reads LLM_BACKEND
+  ollama:
+    url: http://ollama:11434
+    model: qwen2.5:7b
+  openai:
+    secretName: agent-worker-openai # keys: api-key
+    model: gpt-4o-mini

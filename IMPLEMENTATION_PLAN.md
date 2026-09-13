@@ -322,26 +322,46 @@ Phase 2 (`Spec`/`FormSpec`/`dispatch.runSearch`) and Phase 3
 Not a phase: no DESIGN.md section has decided these yet, so there's
 nothing dependency-ordered to schedule until one exists.
 
-- [ ] **Infra — provisioning the agent-loop stack for production.**
-      DESIGN.md "Infra" (top-level architecture) and "Schema ownership"
-      target section — the only backlog item whose shape a DESIGN.md
-      section *has* already decided (Terraform EC2 + Ansible-installed
-      self-managed Kubernetes + Helm); deprioritized rather than
-      undecided, moved here since there's nothing worth deploying
-      continuously yet. `terraform/` is still an empty placeholder and
-      `ansible/` only has the `mac_dev` dev-machine role today.
-  - [ ] `terraform/`: EC2 instances + networking for the Kubernetes
-        fleet
-  - [ ] `ansible/`: a new role to install/join self-managed Kubernetes
-        on that fleet (separate from `mac_dev`, which configures a
-        developer's own Mac, not the fleet)
-  - [ ] Docker image per component (`email-intake`, `agent-worker`,
-        `collector`, `search-api`, serving-sync) — one per existing
-        `cmd/` binary
-  - [ ] Helm chart per component, plus the Postgres Flyway pre-install/
-        pre-upgrade hook Job described under "Schema ownership"
-  - [ ] Strimzi Kafka and Postgres as self-managed workloads on the
-        same cluster
+- [x] **Infra — provisioning the agent-loop stack for production
+      (code written, not applied).** DESIGN.md "Infra" and "Schema
+      ownership" target section. Code-complete per that decided shape;
+      deliberately never run — no `terraform apply`/`ansible-playbook`/
+      `docker build`/`helm install` against anything real, since this
+      provisions billable AWS resources and there's still nothing worth
+      deploying continuously (per the note this item was originally
+      filed under). See `terraform/README.md` and `helm/README.md` for
+      the known gaps each layer accepts.
+  - [x] `terraform/`: EC2 fleet (arm64/Graviton, k3s per DESIGN.md
+        "Open decisions") + VPC/subnet/security-group; renders an
+        Ansible inventory from the result — `7623aa7`
+  - [x] `ansible/roles/k8s_fleet`: installs/joins k3s (control-plane
+        then agents, two plays so the join token exists first) —
+        separate from `mac_dev`, which only configures a developer's
+        own Mac — `8f44276`
+  - [x] Docker image per deployable `cmd/` binary (`email-intake`,
+        `agent-worker`, `collector`, `search-api`) — `d24a37e`.
+        `serving-sync` skipped: DESIGN.md notes it "doesn't exist yet,"
+        nothing to containerize
+  - [x] Helm chart per component (`helm/agent-worker`, `collector`,
+        `search-api`, `email-intake`), a shared `sqlite-data` PVC chart,
+        self-managed `postgres` (StatefulSet) and `kafka` (Strimzi
+        `Kafka`/`KafkaNodePool`/`KafkaTopic`) charts, and a
+        `flyway-migrate` library chart for the Postgres pre-install/
+        pre-upgrade migration hook described under "Schema ownership"
+  - [x] Strimzi Kafka and Postgres as self-managed workloads — `helm/
+        kafka`, `helm/postgres` above; `databases/postgres/flyway.toml`
+        + `Dockerfile` (migrations/ itself is still empty — no Postgres
+        schema exists yet, see next item)
+  - **Found while wiring this, not in the original checklist:**
+        `internal/catalog` is SQLite-only (`sql.Open("sqlite", ...)`) —
+        DESIGN.md's "Local development" section already flagged the
+        missing Postgres storage-driver abstraction, but building it
+        wasn't in scope here. So `postgres`/`flyway-migrate` ship as
+        standalone, correct infra that nothing currently depends on;
+        the three SQLite-touching app charts instead share one PVC
+        pinned to a single labeled node (`nodeSelector: sqlite-host`)
+        as an explicit stopgap — see `helm/README.md` "Known gap" for
+        the follow-up once a Postgres driver lands in Go
 - [ ] Multi-airport origin/destination (e.g. treat PEK/PKX/NAY as
       interchangeable, price each, keep the cheapest) — needs a
       DESIGN.md write-up and an explicit decision first, not started

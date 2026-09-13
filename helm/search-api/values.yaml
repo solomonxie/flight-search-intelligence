@@ -1,0 +1,11 @@
+image:
+  repository: flight-search-intelligence/search-api
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicas: 1
+
+resources: {}
+
+service:
+  port: 8080

@@ -1,0 +1,42 @@
+# One Job per invocation — install this chart per request/follow-up
+# (`helm install <release> ./helm/email-intake --set mode=start --set
+# text="..."`), don't reuse a release across invocations. See
+# helm/README.md.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: email-intake-{{ .Release.Name }}
+spec:
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      containers:
+        - name: email-intake
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            {{- if eq .Values.mode "signal" }}
+            - -signal
+            - -request-id
+            - {{ required "requestId is required for -signal" .Values.requestId | quote }}
+            {{- else }}
+            - -start
+            {{- end }}
+            - -text
+            - {{ required "text is required" .Values.text | quote }}
+            - -db
+            - "{{ .Values.sqliteData.mountPath }}/flight_search.db"
+            - -kafka-brokers
+            - {{ .Values.kafka.bootstrapServers | quote }}
+            - -openflights-dir
+            - "{{ .Values.sqliteData.mountPath }}/openflights"
+          volumeMounts:
+            - name: sqlite-data
+              mountPath: {{ .Values.sqliteData.mountPath }}
+      volumes:
+        - name: sqlite-data
+          persistentVolumeClaim:
+            claimName: {{ .Values.sqliteData.existingClaim }}

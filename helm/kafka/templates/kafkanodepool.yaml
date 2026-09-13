@@ -1,0 +1,24 @@
+# KRaft mode (DESIGN.md "Local development": "no ZooKeeper") — a single
+# node pool playing both roles, not a separate controller pool. Fine at
+# this project's scale; split controller/broker pools if that changes.
+apiVersion: kafka.strimzi.io/v1beta2
+kind: KafkaNodePool
+metadata:
+  name: dual-role
+  labels:
+    strimzi.io/cluster: {{ .Values.clusterName }}
+spec:
+  replicas: {{ .Values.replicas }}
+  roles:
+    - controller
+    - broker
+  storage:
+    type: jbod
+    volumes:
+      - id: 0
+        type: persistent-claim
+        size: {{ .Values.storage.size }}
+        deleteClaim: false
+        {{- if .Values.storage.storageClassName }}
+        class: {{ .Values.storage.storageClassName }}
+        {{- end }}

@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-worker
+  labels:
+    app.kubernetes.io/name: agent-worker
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agent-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agent-worker
+    spec:
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      containers:
+        - name: agent-worker
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: DB_PATH
+              value: "{{ .Values.sqliteData.mountPath }}/flight_search.db"
+            - name: KAFKA_BROKERS
+              value: {{ .Values.kafka.bootstrapServers | quote }}
+            - name: LLM_BACKEND
+              value: {{ .Values.llm.backend | quote }}
+            {{- if eq .Values.llm.backend "openai" }}
+            - name: OPENAI_MODEL
+              value: {{ .Values.llm.openai.model | quote }}
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.llm.openai.secretName }}
+                  key: api-key
+            {{- else }}
+            - name: OLLAMA_URL
+              value: {{ .Values.llm.ollama.url | quote }}
+            - name: OLLAMA_MODEL
+              value: {{ .Values.llm.ollama.model | quote }}
+            {{- end }}
+          volumeMounts:
+            - name: sqlite-data
+              mountPath: {{ .Values.sqliteData.mountPath }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: sqlite-data
+          persistentVolumeClaim:
+            claimName: {{ .Values.sqliteData.existingClaim }}
