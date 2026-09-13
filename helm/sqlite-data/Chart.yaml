@@ -1,0 +1,9 @@
+apiVersion: v2
+name: sqlite-data
+description: >-
+  Shared PersistentVolumeClaim for the SQLite serving store, mounted by
+  agent-worker/collector/search-api. Stopgap until internal/catalog
+  gains a Postgres backend (DESIGN.md "Local development") — see
+  helm/README.md "Known gap" before installing any of those three.
+type: application
+version: 0.1.0

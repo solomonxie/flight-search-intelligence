@@ -1,0 +1,16 @@
+image: postgres:16-alpine
+
+database: flight_search
+
+# Real values belong in a gitignored values-secret.yaml (--values), or
+# --set at install time — never committed here.
+credentials:
+  secretName: postgres-credentials
+  username: flight_search
+  password: changeme
+
+storage:
+  size: 20Gi
+  storageClassName: "" # cluster default
+
+resources: {}

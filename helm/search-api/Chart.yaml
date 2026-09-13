@@ -1,0 +1,5 @@
+apiVersion: v2
+name: search-api
+description: cmd/search-api — serving-store lookup + miss-triggers-collection (DESIGN.md "Components"). Scaffold today — see main.go.
+type: application
+version: 0.1.0

@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: collector
+  labels:
+    app.kubernetes.io/name: collector
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: collector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: collector
+    spec:
+      nodeSelector:
+        {{- toYaml .Values.nodeSelector | nindent 8 }}
+      containers:
+        - name: collector
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          # Overrides the Dockerfile's default CMD: real Kafka brokers
+          # and concurrency instead of localhost/hardcoded defaults.
+          args:
+            - -worker
+            - -db
+            - "{{ .Values.sqliteData.mountPath }}/flight_search.db"
+            - -out-dir
+            - "{{ .Values.sqliteData.mountPath }}/raw"
+            - -openflights-dir
+            - "{{ .Values.sqliteData.mountPath }}/openflights"
+            - -kafka-brokers
+            - {{ .Values.kafka.bootstrapServers | quote }}
+            - -concurrency
+            - {{ .Values.concurrency | quote }}
+          volumeMounts:
+            - name: sqlite-data
+              mountPath: {{ .Values.sqliteData.mountPath }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: sqlite-data
+          persistentVolumeClaim:
+            claimName: {{ .Values.sqliteData.existingClaim }}

@@ -1,0 +1,8 @@
+claimName: sqlite-data
+size: 5Gi
+storageClassName: "" # cluster default
+# ReadWriteOnce is an EBS-backed volume's only real option — fine here
+# only because every pod that mounts this claim is pinned (nodeSelector,
+# see the consuming charts) to the one node this claim's volume attaches
+# to. See helm/README.md "Known gap".
+accessMode: ReadWriteOnce
