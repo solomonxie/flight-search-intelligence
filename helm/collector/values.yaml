@@ -1,0 +1,21 @@
+image:
+  repository: flight-search-intelligence/collector
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# Stays at 1 while SQLite-backed (see helm/README.md "Known gap").
+replicas: 1
+
+resources: {}
+
+concurrency: 3
+
+sqliteData:
+  existingClaim: sqlite-data
+  mountPath: /app/data
+
+kafka:
+  bootstrapServers: kafka-kafka-bootstrap:9092
+
+nodeSelector:
+  sqlite-host: "true"

@@ -1,0 +1,18 @@
+image:
+  repository: flight-search-intelligence/email-intake
+  tag: latest
+  pullPolicy: IfNotPresent
+
+mode: start # start | signal
+text: "" # required for both modes
+requestId: "" # required for -signal
+
+sqliteData:
+  existingClaim: sqlite-data
+  mountPath: /app/data
+
+kafka:
+  bootstrapServers: kafka-kafka-bootstrap:9092
+
+nodeSelector:
+  sqlite-host: "true"

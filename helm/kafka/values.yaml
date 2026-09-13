@@ -1,0 +1,16 @@
+clusterName: kafka
+replicas: 3 # dual-role (controller+broker) nodes; local dev overrides to 1
+
+storage:
+  size: 20Gi
+  storageClassName: "" # cluster default
+
+kafkaVersion: "3.8.0"
+
+topics:
+  - name: agent-decisions
+    partitions: 3
+    replicationFactor: 3
+  - name: search-tasks
+    partitions: 3
+    replicationFactor: 3

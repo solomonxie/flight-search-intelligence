@@ -1,0 +1,5 @@
+apiVersion: v2
+name: agent-worker
+description: cmd/agent-worker — the agent loop's decision step (DESIGN.md "Agent loop")
+type: application
+version: 0.1.0

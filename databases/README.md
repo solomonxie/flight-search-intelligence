@@ -33,9 +33,13 @@ and brings it up to date.
 - **`sqlite/`** — what's actually used today, for local testing.
   Contains the numbered change files (`migrations/`) and a small config
   file telling Flyway where the database lives.
-- **`postgres/`** — an empty placeholder for the real database the
-  live/production version of this project will eventually use. Nothing
-  here yet.
+- **`postgres/`** — the prod database, same pattern as `sqlite/`
+  (`flyway.toml` + `migrations/`), but `migrations/` is still empty: no
+  Postgres schema has actually been designed yet, so there's nothing to
+  version. `Dockerfile` bakes whatever's in here into the official
+  `flyway/flyway` image for `helm/flyway-migrate`'s hook Job to run —
+  see the root `helm/README.md` "Known gap" for why nothing wires this
+  in yet either.
 - **`clickhouse/`** — just an empty leftover folder sitting on disk. It's
   not part of the plan anywhere else in this project, and it isn't even
   saved in the project's history — noting it here so it isn't a mystery,

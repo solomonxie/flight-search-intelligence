@@ -1,0 +1,8 @@
+# Flyway config for the prod Postgres serving store (see DESIGN.md
+# "Schema ownership"). url/user/password are deliberately absent here —
+# Flyway reads them from FLYWAY_URL/FLYWAY_USER/FLYWAY_PASSWORD env
+# vars instead, set from a Kubernetes Secret by helm/flyway-migrate's
+# Job, never hardcoded in this file.
+
+[flyway]
+locations = ["filesystem:databases/postgres/migrations"]

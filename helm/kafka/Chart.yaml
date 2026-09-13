@@ -1,0 +1,10 @@
+apiVersion: v2
+name: kafka
+description: >-
+  Strimzi Kafka cluster (KRaft mode) + the agent-decisions/search-tasks
+  topics (internal/kafka's package doc, DESIGN.md "Infra"). Requires
+  the Strimzi operator already installed cluster-wide — this chart
+  only supplies the custom resources it watches, not the operator
+  itself. See helm/README.md for the operator install command.
+type: application
+version: 0.1.0

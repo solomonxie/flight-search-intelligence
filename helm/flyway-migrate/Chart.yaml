@@ -1,0 +1,11 @@
+apiVersion: v2
+name: flyway-migrate
+description: >-
+  Shared pre-install/pre-upgrade Flyway migration Job template
+  (DESIGN.md "Schema ownership") for any chart that reads/writes the
+  Postgres serving store. A library chart: it renders nothing on its
+  own — a consuming chart declares it as a dependency and calls
+  {{ include "flyway-migrate.job" . }} from its own templates/.
+  Not yet included by any chart — see helm/README.md "Known gap".
+type: library
+version: 0.1.0
