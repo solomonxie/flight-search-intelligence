@@ -363,11 +363,15 @@ nothing dependency-ordered to schedule until one exists.
         as an explicit stopgap — see `helm/README.md` "Known gap" for
         the follow-up once a Postgres driver lands in Go
 - [ ] Multi-airport origin/destination (e.g. treat PEK/PKX/NAY as
-      interchangeable, price each, keep the cheapest) — needs a
-      DESIGN.md write-up and an explicit decision first, not started
+      interchangeable, price each, keep the cheapest) — DESIGN.md
+      "Multi-airport origin/destination" now has a draft write-up
+      (pending review — not a decision yet); implementation not started
 - [ ] Seat/cabin filters (legroom, seat class) as additional query
       inputs — same "query input, not a scoring adjustment" shape as
-      Phase 4's baggage, but no DESIGN.md write-up exists yet
+      Phase 4's baggage; DESIGN.md "Seat/cabin class as a query input"
+      now has a draft write-up (pending review — not a decision yet,
+      and proposes dropping legroom specifically, see that section).
+      Implementation not started
 - Fixed-length trip, wide-open window as its own agent-loop request
   shape — superseded by Phase 5 above (generalized to any width, on any
   fuzzy dimension, not just this one example), not a backlog item anymore
