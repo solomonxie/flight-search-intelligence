@@ -1,0 +1,7 @@
+.git/
+data/
+terraform/.terraform/
+terraform/*.tfstate*
+ansible/inventories/aws/hosts.ini
+*.md
+.env
