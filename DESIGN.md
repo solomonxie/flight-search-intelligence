@@ -290,6 +290,69 @@ logic. (Known limitation, not fixable here: Google's own bag-fee
 display isn't perfectly complete for every low-cost carrier — inherited,
 not something this codebase can correct.)
 
+**Seat/cabin class as a query input (DRAFT — pending review, not
+decided).** Status: drafted for review per IMPLEMENTATION_PLAN.md's
+backlog — not a decision yet, nothing should be implemented against it
+until it is. Same "concrete, plumbing exists lower down but nothing
+above it sets it yet" category baggage was in before Phase 4:
+`googleflights.Query.Seat` (economy/premium/business/first) is already
+a real field, already wired into the wire encoding
+(`protobuf.go`'s `putVarintField(&buf, 9, int64(q.Seat))`) —
+`toQuery()` just hardcodes it to `SeatEconomy` today, and nothing above
+`SearchParams` sets it.
+
+Unlike baggage, this **isn't** a free "same comparison logic, price
+becomes inclusive for free" case: a business-class query returns
+fundamentally different, much higher fares than an economy one, so
+cabin class is closer in kind to `MaxPrice`/`MaxStops` — a hard filter
+on which offers are eligible at all, applied once at the query layer.
+Still zero new scoring logic needed: `pickCheapestFeasible`/the Pareto
+set/`bestConnection` keep comparing `Offer.Price` exactly as today,
+they just now compare offers that already came back cabin-filtered.
+
+Proposed plumbing, the same shape Phase 4 already used for
+`CheckedBags`: `SearchParams` gains a `Seat *googleflights.Seat` (or
+equivalent) → `toQuery()` uses it instead of the hardcoded default →
+`routesearch.Params` gains a `Cabin` field, threaded through every
+`searchOffers` call site (`search.go`'s baseline/leg1/leg2,
+`roundtrip.go`, `flexible.go`'s `scanPair`, `nhop.go`'s two call
+sites) → `agents.Spec` gains a `Cabin` field, threaded into
+`CollectRouteRequest`, `FormSpec`'s prompt, `decideSystemPrompt`'s
+dispatch-argument contract, and `fillDispatchDefaults`.
+
+**Two gaps to close proactively, not rediscover live** — Phase 4 found
+both the hard way for `CheckedBags`, so this draft names them up front
+instead:
+- `flight_offers_cache`'s lookup key doesn't include cabin class either
+  — a cabin-aware search made within cache freshness of an existing
+  economy-only scrape for the same route/date would silently reuse the
+  wrong-cabin price, same bug Flyway `V009` fixed for bags.
+- `agents.bookingLink` needs to carry the dispatched request's cabin
+  class too, for the same reason it needed to carry `CheckedBags` — the
+  booking link must price the same itinerary Google just quoted.
+
+**Legroom is likely out of scope, not just deferred.** The backlog item
+names "legroom, seat class" together, but nothing this codebase has
+reverse-engineered from Google Flights' response carries a legroom
+value independently of cabin — `Seat` (the enum above) is the only
+cabin-related axis actually wired at the protocol level today.
+Proposing this draft cover cabin class only, and either drop legroom or
+time-box a spike (same shape as Phase 5's price-calendar-endpoint
+spike) to confirm whether a legroom field exists in the response at
+all before committing to it.
+
+**Open decisions**:
+- **Cabin as a hard filter vs. a soft preference**: proposing hard (a
+  `Cabin` field always means "only this cabin," never "prefer but allow
+  cheaper economy back-up") — say so if a softer "prefer business,
+  accept economy if it's much cheaper" shape is actually wanted, since
+  that would need to stay a `SoftConstraints` judgment call instead.
+- **Default value**: proposing `SeatEconomy` stays the unconditional
+  default exactly as today when nothing sets `Cabin`, so this is
+  purely additive — no existing caller's behavior changes.
+- **Legroom**: see above — proposing dropped from this feature's scope
+  unless a spike finds it's actually queryable.
+
 **The loop degenerates gracefully for the simple case.** A precise,
 unambiguous request (most `search-api` misses, and plenty of plain
 emails) needs none of this back-and-forth — step 1 produces a spec with
@@ -984,6 +1047,82 @@ until a concrete one is actually needed rather than guessed at now.
   raise. Still open if a caller does set an explicit `QUERY_BUDGET`: say
   so if you want it to scale with `MaxLegs` automatically rather than
   stay a single manually-set number.
+
+### Multi-airport origin/destination (DRAFT — pending review, not decided)
+
+**Status: drafted for review, per IMPLEMENTATION_PLAN.md's backlog —
+nothing below is a decision yet, and nothing should be implemented
+against it until it is.**
+
+The backlog framing: treat a city's several airports (PEK/PKX/NAY for
+Beijing; JFK/LGA/EWR for New York; LHR/LGW/STN/LTN/LCY/SEN for London)
+as interchangeable when the traveler names a city rather than a specific
+airport — search all of them, keep the cheapest result, not just the
+one Google happens to associate with the city's "main" code.
+
+**This supersedes today's disambiguation-to-one-code behavior, it
+doesn't sit alongside it.** A named-but-ambiguous city is currently
+resolved by asking the agent to pick (or ask the user for) a single
+IATA code (`internal/agents/decide.go`'s ambiguous-city handling,
+`db57f8b`) before a search ever runs. Under this proposal that step
+goes away for the interchangeable-airport case specifically: instead of
+narrowing to one code, the search fans out across every code and prices
+each — closer to how a human flexible traveler actually shops. A city
+that's genuinely ambiguous for a different reason (e.g. two same-named
+cities in different countries) still needs disambiguation first; this
+doesn't touch that case, only the "which of this one city's own
+airports" case.
+
+**The candidate set already exists — reuse it, don't rebuild it.**
+`internal/openflights.Graph.AirportsInCity(city)` already returns every
+airport IATA code matching a city name, scoped to the dominant country
+to avoid cross-country name collisions (used today only to compute
+`CityCenter`'s lat/lon average). This is exactly the list to search
+across; no new OpenFlights lookup is needed.
+
+**Shape: a cross product, same pattern `SearchDateRange` already
+established for two independent flexible dimensions.** `Params.Origin`/
+`Destination` stay single-airport `string` fields — nothing about
+`ResolveCandidates`/`nhop.go`'s hub search changes. A new caller-facing
+entry point (`routesearch.SearchMultiAirport`, or similar) takes
+`OriginCandidates []string` × `DestinationCandidates []string`, runs the
+existing single-airport `Search` once per pair, and keeps the cheapest
+— the same "window² queries, an accepted cost tradeoff, not scaled back
+automatically" reasoning `SearchDateRange`'s depart×return grid already
+uses for exactly this kind of multiplicative fan-out (see "Round trips
+and flexible dates" below). Reported via a `ChosenOrigin`/
+`ChosenDestination` pair on the result, mirroring
+`ChosenDepartDate`/`ChosenReturnDate`.
+
+**Cost is genuinely multiplicative, same caution N-hop already
+flagged.** A 3-airport city crossed with another 3-airport city is 9x
+the baseline scrape count before any date flexibility is even layered
+on top; crossed with a flexible-date search too, it compounds further.
+Same mitigation already established elsewhere in this design: disclose
+the estimated combination count before spending a single real scrape
+(`cmd/routesearch/confirm.go`'s pattern, `DecideNextAction`'s existing
+"disclose default assumptions on first `ask_user`" — Phase 5 already
+extended both for the trip-length/date-window fan-out; this would be a
+third fan-out dimension feeding the same estimate).
+
+**Open decisions**:
+- **Does this apply to intermediate hops too, or only the traveler-named
+  endpoints?** The backlog's own example (PEK/PKX/NAY) is about the
+  *named* origin/destination, not a hub the search algorithm picks for
+  itself — proposing endpoints-only, since intermediate hubs are already
+  chosen by `CandidateHubs`/`Neighbors`, not ambiguously named by a
+  user. Say so if hop-level fan-out is wanted too.
+- **A cap on combinations**, the same shape `MaxCountries`/`MaxLegs`
+  already cap unbounded fan-out elsewhere — e.g. `MaxAirportsPerCity`,
+  so a huge metro area doesn't silently multiply a request's cost
+  without the traveler ever agreeing to it. Not proposed here as a
+  specific number; needs a decision.
+- **Where the candidate list is resolved**: proposing `agents.FormSpec`
+  populates `OriginCandidates`/`DestinationCandidates` directly from
+  `AirportsInCity` once free text names a city rather than one code —
+  same "Go checks it mechanically" rule "Spec's concrete fields" already
+  uses elsewhere. Say so if this should instead stay a `SoftConstraints`-
+  driven judgment call the LLM makes explicitly, request by request.
 
 ### Round trips and flexible dates
 
